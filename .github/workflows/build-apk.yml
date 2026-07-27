@@ -1,0 +1,48 @@
+name: Build APK
+
+# Bouwt de app in GitHub's cloud - geen PC/Android Studio nodig.
+# Start automatisch bij een push naar main, of handmatig via
+# "Run workflow" op de Actions-pagina (ook vanaf de GitHub mobile app/site).
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: JDK 17 installeren
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK installeren
+        uses: android-actions/setup-android@v4
+
+      - name: Gradle wrapper uitvoerbaar maken
+        run: chmod +x gradlew
+
+      - name: Debug-APK bouwen
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: APK bewaren als artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hr-ble-bridge-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: APK aan GitHub Release toevoegen
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: HR BLE Bridge build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
