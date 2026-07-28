@@ -33,6 +33,13 @@
         android:layout_marginTop="8dp"
         android:text="3. Gekoppelde apparaten vernieuwen" />
 
+    <Button
+        android:id="@+id/knopScan"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="4. Scan naar band (BLE, 12 sec.)" />
+
     <ListView
         android:id="@+id/apparatenLijst"
         android:layout_width="match_parent"

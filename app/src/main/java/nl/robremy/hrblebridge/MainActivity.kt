@@ -1,6 +1,9 @@
 package nl.robremy.hrblebridge
 
 import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -8,6 +11,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.widget.ArrayAdapter
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,6 +25,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var prefs: SharedPreferences
     private var gekozenMac: String? = null
+
+    // adres -> label, voor zowel de gekoppelde-lijst als de scanresultaten
+    private val getoondeApparaten = LinkedHashMap<String, String>()
+    private var scanBezig = false
+    private val scanHandler = Handler(Looper.getMainLooper())
+    private val SCAN_DUUR_MS = 12_000L
 
     private val permissieLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -41,6 +52,7 @@ class MainActivity : AppCompatActivity() {
         binding.knopPermissies.setOnClickListener { vraagPermissiesAan() }
         binding.knopAlleBestanden.setOnClickListener { vraagAlleBestandenToegangAan() }
         binding.knopVernieuwen.setOnClickListener { toonGekoppeldeApparaten() }
+        binding.knopScan.setOnClickListener { startScan() }
 
         binding.knopStart.setOnClickListener {
             val mac = gekozenMac
@@ -61,13 +73,18 @@ class MainActivity : AppCompatActivity() {
 
         binding.apparatenLijst.setOnItemClickListener { parent, _, positie, _ ->
             val label = parent.getItemAtPosition(positie) as String
-            val mac = label.substringAfterLast("(").removeSuffix(")")
+            val mac = label.substringAfter("(").substringBefore(")")
             gekozenMac = mac
             prefs.edit().putString("mac_address", mac).apply()
             binding.statusText.text = "Gekozen: $label"
         }
 
         toonGekoppeldeApparaten()
+    }
+
+    override fun onDestroy() {
+        stopScanIntern()
+        super.onDestroy()
     }
 
     private fun benodigdePermissies(): Array<String> {
@@ -108,17 +125,91 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
-        val gebonden = adapter?.bondedDevices?.map { "${it.name} (${it.address})" } ?: emptyList()
+        val gebonden = adapter?.bondedDevices ?: emptySet()
 
-        binding.apparatenLijst.adapter = ArrayAdapter(
-            this, android.R.layout.simple_list_item_1, gebonden
-        )
+        getoondeApparaten.clear()
+        gebonden.forEach { d ->
+            getoondeApparaten[d.address] = "${d.name ?: "(naamloos)"} (${d.address}) \u00b7 gekoppeld"
+        }
+        verversLijst()
 
-        if (gebonden.isEmpty()) {
-            binding.statusText.text =
-                "Geen gekoppelde apparaten. Koppel de band eerst via Android-Bluetooth-instellingen."
+        binding.statusText.text = if (gebonden.isEmpty()) {
+            "Geen gekoppelde apparaten. Probeer 'Scan naar band (BLE)' hieronder."
         } else {
-            binding.statusText.text = "Kies de hartslagband uit de lijst"
+            "${gebonden.size} gekoppeld apparaat/apparaten. Zie je de band niet? Probeer de BLE-scan."
         }
     }
+
+    // ---------------------------------------------------------------------
+    // Directe BLE-scan (vindt de band ook als hij niet als 'gekoppeld' geldt)
+    // ---------------------------------------------------------------------
+
+    @Suppress("MissingPermission")
+    private fun startScan() {
+        if (!heeftPermissies()) {
+            binding.statusText.text = "Tik eerst op 'Permissies aanvragen'"
+            return
+        }
+        if (scanBezig) return
+
+        val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+        val scanner = adapter?.bluetoothLeScanner
+        if (adapter == null || !adapter.isEnabled || scanner == null) {
+            binding.statusText.text = "Bluetooth staat uit of niet beschikbaar"
+            return
+        }
+
+        getoondeApparaten.clear()
+        verversLijst()
+        scanBezig = true
+        binding.statusText.text =
+            "Scannen... (zorg dat locatievoorziening/GPS aanstaat en de band dichtbij is)"
+
+        val instellingen = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+
+        scanner.startScan(null, instellingen, scanCallback)
+        scanHandler.postDelayed({ stopScanIntern() }, SCAN_DUUR_MS)
+    }
+
+    @Suppress("MissingPermission")
+    private fun stopScanIntern() {
+        if (!scanBezig) return
+        scanBezig = false
+        try {
+            val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+            adapter?.bluetoothLeScanner?.stopScan(scanCallback)
+        } catch (_: Exception) {
+            // adapter kan intussen uit staan; niets aan te doen
+        }
+        binding.statusText.text =
+            if (getoondeApparaten.isEmpty())
+                "Scan klaar, niets gevonden. Band dichterbij houden en opnieuw proberen."
+            else
+                "Scan klaar \u2014 kies de band uit de lijst"
+    }
+
+    @Suppress("MissingPermission")
+    private val scanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val device = result.device
+            val naam = result.scanRecord?.deviceName ?: device.name ?: "(naamloos)"
+            val label = "$naam (${device.address}) \u00b7 ${result.rssi} dBm"
+            getoondeApparaten[device.address] = label
+            verversLijst()
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            scanBezig = false
+            binding.statusText.text = "Scan mislukt (foutcode $errorCode)"
+        }
+    }
+
+    private fun verversLijst() {
+        binding.apparatenLijst.adapter = ArrayAdapter(
+            this, android.R.layout.simple_list_item_1, getoondeApparaten.values.toList()
+        )
+    }
 }
+
