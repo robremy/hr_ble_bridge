@@ -7,6 +7,13 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="s" />
+    <!-- Oudere Android-versies (<12) gebruiken deze klassieke permissies i.p.v.
+         BLUETOOTH_CONNECT/SCAN, en vereisen ze om bv. bondedDevices() te mogen
+         aanroepen (anders volgt een SecurityException/crash) -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
     <!-- Oudere Android-versies (<12) hebben FINE_LOCATION nodig voor BLE -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
