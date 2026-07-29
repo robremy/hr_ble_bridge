@@ -64,22 +64,30 @@ class HrBridgeService : Service() {
     override fun onCreate() {
         super.onCreate()
         maakNotificatieKanaal()
+        FileLog.log(TAG, "Service onCreate")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         stoppedByUser = false
         macAddress = intent?.getStringExtra(EXTRA_MAC) ?: macAddress
+        FileLog.log(TAG, "onStartCommand, mac=$macAddress")
 
-        val notificatie = bouwNotificatie("Verbinden met band...")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID, notificatie, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
-        } else {
-            startForeground(NOTIF_ID, notificatie)
-        }
+        try {
+            val notificatie = bouwNotificatie("Verbinden met band...")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIF_ID, notificatie, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            } else {
+                startForeground(NOTIF_ID, notificatie)
+            }
 
-        macAddress?.let { verbind(it) } ?: run {
-            Log.e(TAG, "Geen MAC-adres opgegeven, service stopt")
-            stopSelf()
+            macAddress?.let { verbind(it) } ?: run {
+                Log.e(TAG, "Geen MAC-adres opgegeven, service stopt")
+                FileLog.log(TAG, "Geen MAC-adres opgegeven, service stopt")
+                stopSelf()
+            }
+        } catch (e: Exception) {
+            FileLog.logFout(TAG, "Fout in onStartCommand", e)
+            throw e
         }
 
         return START_STICKY
@@ -100,9 +108,11 @@ class HrBridgeService : Service() {
     // -------------------------------------------------------------------
 
     private fun verbind(mac: String) {
+        FileLog.log(TAG, "verbind() aangeroepen voor $mac")
         val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
         if (adapter == null || !adapter.isEnabled) {
             Log.e(TAG, "Bluetooth-adapter niet beschikbaar/uit, probeer over ${RECONNECT_DELAY_MS}ms opnieuw")
+            FileLog.log(TAG, "Bluetooth-adapter niet beschikbaar/uit")
             plannerHerverbind()
             return
         }
@@ -111,6 +121,7 @@ class HrBridgeService : Service() {
             adapter.getRemoteDevice(mac)
         } catch (e: IllegalArgumentException) {
             Log.e(TAG, "Ongeldig MAC-adres: $mac", e)
+            FileLog.logFout(TAG, "Ongeldig MAC-adres: $mac", e)
             stopSelf()
             return
         }
@@ -129,6 +140,7 @@ class HrBridgeService : Service() {
     private val gattCallback = object : BluetoothGattCallback() {
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            FileLog.log(TAG, "onConnectionStateChange status=$status newState=$newState")
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     Log.i(TAG, "GATT verbonden, services ontdekken...")
@@ -149,10 +161,12 @@ class HrBridgeService : Service() {
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+            FileLog.log(TAG, "onServicesDiscovered status=$status")
             val service = g.getService(HR_SERVICE_UUID)
             val char = service?.getCharacteristic(HR_MEASUREMENT_UUID)
             if (char == null) {
                 Log.e(TAG, "Heart Rate-service/characteristic niet gevonden")
+                FileLog.log(TAG, "Heart Rate-characteristic niet gevonden")
                 schrijfEvent("Heart Rate-characteristic niet gevonden op dit apparaat")
                 updateNotificatie("Fout: HR-characteristic niet gevonden")
                 return

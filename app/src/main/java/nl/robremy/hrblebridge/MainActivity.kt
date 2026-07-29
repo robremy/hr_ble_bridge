@@ -1,5 +1,6 @@
 package nl.robremy.hrblebridge
 
+import android.app.AlertDialog
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
@@ -15,10 +16,13 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.widget.ArrayAdapter
+import android.widget.ScrollView
+import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import nl.robremy.hrblebridge.databinding.ActivityMainBinding
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -53,12 +57,14 @@ class MainActivity : AppCompatActivity() {
         binding.knopAlleBestanden.setOnClickListener { vraagAlleBestandenToegangAan() }
         binding.knopVernieuwen.setOnClickListener { toonGekoppeldeApparaten() }
         binding.knopScan.setOnClickListener { startScan() }
+        binding.knopToonLog.setOnClickListener { toonLogbestand() }
 
         binding.knopStart.setOnClickListener {
             val mac = gekozenMac
             if (mac == null) {
                 binding.statusText.text = "Kies eerst een apparaat uit de lijst"
             } else {
+                FileLog.log("MainActivity", "Start bridge getikt voor $mac")
                 val intent = Intent(this, HrBridgeService::class.java)
                 intent.putExtra(HrBridgeService.EXTRA_MAC, mac)
                 ContextCompat.startForegroundService(this, intent)
@@ -210,6 +216,30 @@ class MainActivity : AppCompatActivity() {
         binding.apparatenLijst.adapter = ArrayAdapter(
             this, android.R.layout.simple_list_item_1, getoondeApparaten.values.toList()
         )
+    }
+
+    private fun toonLogbestand() {
+        val bestand = File(Environment.getExternalStorageDirectory(), "HBmonitor/bridge_debug.log")
+        val inhoud = if (bestand.exists()) {
+            val regels = bestand.readLines()
+            regels.takeLast(200).joinToString("\n")
+        } else {
+            "Nog geen logbestand gevonden op ${bestand.absolutePath}\n\n" +
+                "(Verleen eerst bestandstoegang bij stap 2, en start/gebruik de app/bridge minstens één keer.)"
+        }
+
+        val tekstView = TextView(this).apply {
+            text = inhoud
+            setPadding(32, 32, 32, 32)
+            setTextIsSelectable(true)
+        }
+        val scroll = ScrollView(this).apply { addView(tekstView) }
+
+        AlertDialog.Builder(this)
+            .setTitle("Logbestand (laatste 200 regels)")
+            .setView(scroll)
+            .setPositiveButton("Sluiten", null)
+            .show()
     }
 }
 
