@@ -27,6 +27,11 @@
     <!-- Wegschrijven naar gedeelde opslag, leesbaar voor Termux -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
+    <!-- Op Android <11 bestaat MANAGE_EXTERNAL_STORAGE niet; daar is deze
+         klassieke (runtime-aanvraagbare) permissie nodig om naar gedeelde
+         opslag te mogen schrijven -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <!-- Optioneel: service automatisch herstarten na een reboot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -36,6 +41,7 @@
         android:label="HR BLE Bridge"
         android:icon="@android:drawable/ic_dialog_info"
         android:theme="@style/Theme.Material3.DayNight.NoActionBar"
+        android:requestLegacyExternalStorage="true"
         android:allowBackup="false">
 
         <activity

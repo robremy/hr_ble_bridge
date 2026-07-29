@@ -51,4 +51,19 @@ object FileLog {
         val stacktrace = throwable.stackTraceToString()
         log(tag, "FOUT: $bericht\n$stacktrace")
     }
+
+    /** Zoals log(), maar geeft de eventuele fout terug i.p.v. hem te slikken
+     * — handig om in de UI direct te tonen wat er misgaat. */
+    @Synchronized
+    fun testSchrijven(): Throwable? {
+        return try {
+            val regel = "${formaat.format(Date())} [TEST] Testschrijving\n"
+            logBestand()?.let { bestand ->
+                FileOutputStream(bestand, true).use { it.write(regel.toByteArray(Charsets.UTF_8)) }
+            } ?: return IllegalStateException("logBestand() gaf null terug")
+            null
+        } catch (e: Exception) {
+            e
+        }
+    }
 }

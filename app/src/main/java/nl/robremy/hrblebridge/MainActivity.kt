@@ -115,12 +115,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun vraagAlleBestandenToegangAan() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
-            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-            intent.data = Uri.parse("package:$packageName")
-            startActivity(intent)
-        } else {
-            binding.statusText.text = "Bestandstoegang al verleend"
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
+                if (!Environment.isExternalStorageManager()) {
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                    intent.data = Uri.parse("package:$packageName")
+                    startActivity(intent)
+                } else {
+                    binding.statusText.text = "Bestandstoegang al verleend"
+                }
+            }
+            else -> {
+                // Android <11: geen apart instellingenscherm, gewoon een
+                // normale runtime-permissie-aanvraag.
+                val heeftAl = ContextCompat.checkSelfPermission(
+                    this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (heeftAl) {
+                    binding.statusText.text = "Bestandstoegang al verleend"
+                } else {
+                    permissieLauncher.launch(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE))
+                }
+            }
         }
     }
 
@@ -219,12 +235,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toonLogbestand() {
+        // Testschrijving, zodat een permissiefout direct zichtbaar is i.p.v.
+        // een verwarrende "bestand niet gevonden".
+        var schrijfFout: String? = null
+        val fout = FileLog.testSchrijven()
+        if (fout != null) schrijfFout = fout.toString()
+
         val bestand = File(Environment.getExternalStorageDirectory(), "HBmonitor/bridge_debug.log")
         val inhoud = if (bestand.exists()) {
             val regels = bestand.readLines()
             regels.takeLast(200).joinToString("\n")
         } else {
             "Nog geen logbestand gevonden op ${bestand.absolutePath}\n\n" +
+                "Testschrijving zonet: ${if (schrijfFout == null) "leek te lukken, maar bestand bestaat alsnog niet \u2014 vermoedelijk een permissieprobleem" else "MISLUKT: $schrijfFout"}\n\n" +
                 "(Verleen eerst bestandstoegang bij stap 2, en start/gebruik de app/bridge minstens één keer.)"
         }
 
