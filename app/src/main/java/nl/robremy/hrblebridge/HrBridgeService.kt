@@ -70,13 +70,12 @@ class HrBridgeService : Service() {
         stoppedByUser = false
         macAddress = intent?.getStringExtra(EXTRA_MAC) ?: macAddress
 
-        startForeground(
-            NOTIF_ID,
-            bouwNotificatie("Verbinden met band..."),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            else 0
-        )
+        val notificatie = bouwNotificatie("Verbinden met band...")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIF_ID, notificatie, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } else {
+            startForeground(NOTIF_ID, notificatie)
+        }
 
         macAddress?.let { verbind(it) } ?: run {
             Log.e(TAG, "Geen MAC-adres opgegeven, service stopt")
