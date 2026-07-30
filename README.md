@@ -100,7 +100,22 @@ installeren" — Android vraagt dit vanzelf).
 2. Laat Gradle syncen.
 3. **Build -> Build Bundle(s) / APK(s) -> Build APK(s)**.
 
-## Bekende beperkingen / dingen om te checken
+## Logbestand (debuggen zonder logcat/root)
+
+De app schrijft al zijn belangrijke stappen én elke crash weg naar:
+
+```
+/storage/emulated/0/HBmonitor/bridge_debug.log
+```
+
+Bekijken kan op twee manieren:
+- **In de app zelf:** knop "Toon logbestand" (laatste 200 regels).
+- **Vanuit Termux:**
+  ```bash
+  cat ~/storage/shared/HBmonitor/bridge_debug.log
+  ```
+
+
 
 - **Niet getest** — ik heb geen Android-toestel/emulator beschikbaar in
   deze omgeving, dus dit is ongecompileerde/ongeteste broncode op basis van
