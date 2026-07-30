@@ -51,6 +51,7 @@ class HrBridgeService : Service() {
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         private const val RECONNECT_DELAY_MS = 5_000L
+        private const val CONNECT_TIMEOUT_MS = 12_000L
     }
 
     private var gatt: BluetoothGatt? = null
@@ -58,36 +59,30 @@ class HrBridgeService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var stoppedByUser = false
     private var laatsteBpm: Int? = null
+    private var verbonden = false
+    private var pogingId = 0
 
     private val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ROOT)
 
     override fun onCreate() {
         super.onCreate()
         maakNotificatieKanaal()
-        FileLog.log(TAG, "Service onCreate")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         stoppedByUser = false
         macAddress = intent?.getStringExtra(EXTRA_MAC) ?: macAddress
-        FileLog.log(TAG, "onStartCommand, mac=$macAddress")
 
-        try {
-            val notificatie = bouwNotificatie("Verbinden met band...")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIF_ID, notificatie, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
-            } else {
-                startForeground(NOTIF_ID, notificatie)
-            }
+        val notificatie = bouwNotificatie("Verbinden met band...")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIF_ID, notificatie, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } else {
+            startForeground(NOTIF_ID, notificatie)
+        }
 
-            macAddress?.let { verbind(it) } ?: run {
-                Log.e(TAG, "Geen MAC-adres opgegeven, service stopt")
-                FileLog.log(TAG, "Geen MAC-adres opgegeven, service stopt")
-                stopSelf()
-            }
-        } catch (e: Exception) {
-            FileLog.logFout(TAG, "Fout in onStartCommand", e)
-            throw e
+        macAddress?.let { verbind(it) } ?: run {
+            Log.e(TAG, "Geen MAC-adres opgegeven, service stopt")
+            stopSelf()
         }
 
         return START_STICKY
@@ -97,6 +92,8 @@ class HrBridgeService : Service() {
 
     override fun onDestroy() {
         stoppedByUser = true
+        pogingId++ // maakt elke lopende watchdog inactief
+        handler.removeCallbacksAndMessages(null)
         gatt?.close()
         gatt = null
         schrijfEvent("Bridge-service gestopt")
@@ -108,11 +105,9 @@ class HrBridgeService : Service() {
     // -------------------------------------------------------------------
 
     private fun verbind(mac: String) {
-        FileLog.log(TAG, "verbind() aangeroepen voor $mac")
         val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
         if (adapter == null || !adapter.isEnabled) {
             Log.e(TAG, "Bluetooth-adapter niet beschikbaar/uit, probeer over ${RECONNECT_DELAY_MS}ms opnieuw")
-            FileLog.log(TAG, "Bluetooth-adapter niet beschikbaar/uit")
             plannerHerverbind()
             return
         }
@@ -121,13 +116,38 @@ class HrBridgeService : Service() {
             adapter.getRemoteDevice(mac)
         } catch (e: IllegalArgumentException) {
             Log.e(TAG, "Ongeldig MAC-adres: $mac", e)
-            FileLog.logFout(TAG, "Ongeldig MAC-adres: $mac", e)
             stopSelf()
             return
         }
 
         updateNotificatie("Verbinden met ${device.name ?: mac}...")
-        gatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        verbonden = false
+        pogingId++
+        val huidigePoging = pogingId
+        gatt = try {
+            device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "BLUETOOTH_CONNECT ontbreekt/ingetrokken, probeer over ${RECONNECT_DELAY_MS}ms opnieuw", e)
+            schrijfEvent("Bluetooth-permissie ontbreekt, opnieuw proberen")
+            plannerHerverbind()
+            return
+        }
+
+        // Watchdog: connectGatt(autoConnect=false) kan bij een apparaat buiten
+        // bereik soms helemaal geen callback geven (bekend Android-gedrag),
+        // waardoor de reconnect-keten anders permanent vastloopt. Forceer na
+        // CONNECT_TIMEOUT_MS een sluiting + nieuwe poging als er nog geen
+        // succesvolle verbinding is.
+        val watchdog = Runnable {
+            if (!verbonden && huidigePoging == pogingId) {
+                Log.w(TAG, "Verbindingspoging $huidigePoging timeout na ${CONNECT_TIMEOUT_MS}ms, forceer retry")
+                schrijfEvent("Verbindingspoging timeout, opnieuw proberen")
+                gatt?.close()
+                gatt = null
+                plannerHerverbind()
+            }
+        }
+        handler.postDelayed(watchdog, CONNECT_TIMEOUT_MS)
     }
 
     private fun plannerHerverbind() {
@@ -140,10 +160,10 @@ class HrBridgeService : Service() {
     private val gattCallback = object : BluetoothGattCallback() {
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-            FileLog.log(TAG, "onConnectionStateChange status=$status newState=$newState")
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     Log.i(TAG, "GATT verbonden, services ontdekken...")
+                    verbonden = true
                     schrijfEvent("BLE verbonden met ${g.device.name ?: g.device.address}")
                     updateNotificatie("Verbonden. Services ontdekken...")
                     g.discoverServices()
@@ -151,22 +171,24 @@ class HrBridgeService : Service() {
 
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.w(TAG, "GATT verbroken (status=$status)")
+                    verbonden = false
                     schrijfEvent("BLE verbinding verbroken (status=$status)")
                     updateNotificatie("Verbinding verbroken, opnieuw verbinden...")
                     g.close()
                     gatt = null
+                    // Kan hier en/of vanuit de watchdog vuren; een dubbele
+                    // reconnect-poging is onschuldig (pogingId maakt de oudere
+                    // watchdog vanzelf inactief), dus gewoon altijd retryen.
                     plannerHerverbind()
                 }
             }
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            FileLog.log(TAG, "onServicesDiscovered status=$status")
             val service = g.getService(HR_SERVICE_UUID)
             val char = service?.getCharacteristic(HR_MEASUREMENT_UUID)
             if (char == null) {
                 Log.e(TAG, "Heart Rate-service/characteristic niet gevonden")
-                FileLog.log(TAG, "Heart Rate-characteristic niet gevonden")
                 schrijfEvent("Heart Rate-characteristic niet gevonden op dit apparaat")
                 updateNotificatie("Fout: HR-characteristic niet gevonden")
                 return

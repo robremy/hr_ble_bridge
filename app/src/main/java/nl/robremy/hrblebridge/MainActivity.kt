@@ -1,6 +1,5 @@
 package nl.robremy.hrblebridge
 
-import android.app.AlertDialog
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
@@ -16,13 +15,10 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.widget.ArrayAdapter
-import android.widget.ScrollView
-import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import nl.robremy.hrblebridge.databinding.ActivityMainBinding
-import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -57,14 +53,12 @@ class MainActivity : AppCompatActivity() {
         binding.knopAlleBestanden.setOnClickListener { vraagAlleBestandenToegangAan() }
         binding.knopVernieuwen.setOnClickListener { toonGekoppeldeApparaten() }
         binding.knopScan.setOnClickListener { startScan() }
-        binding.knopToonLog.setOnClickListener { toonLogbestand() }
 
         binding.knopStart.setOnClickListener {
             val mac = gekozenMac
             if (mac == null) {
                 binding.statusText.text = "Kies eerst een apparaat uit de lijst"
             } else {
-                FileLog.log("MainActivity", "Start bridge getikt voor $mac")
                 val intent = Intent(this, HrBridgeService::class.java)
                 intent.putExtra(HrBridgeService.EXTRA_MAC, mac)
                 ContextCompat.startForegroundService(this, intent)
@@ -115,28 +109,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun vraagAlleBestandenToegangAan() {
-        when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
-                if (!Environment.isExternalStorageManager()) {
-                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                    intent.data = Uri.parse("package:$packageName")
-                    startActivity(intent)
-                } else {
-                    binding.statusText.text = "Bestandstoegang al verleend"
-                }
-            }
-            else -> {
-                // Android <11: geen apart instellingenscherm, gewoon een
-                // normale runtime-permissie-aanvraag.
-                val heeftAl = ContextCompat.checkSelfPermission(
-                    this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
-                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                if (heeftAl) {
-                    binding.statusText.text = "Bestandstoegang al verleend"
-                } else {
-                    permissieLauncher.launch(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE))
-                }
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+            intent.data = Uri.parse("package:$packageName")
+            startActivity(intent)
+        } else {
+            binding.statusText.text = "Bestandstoegang al verleend"
         }
     }
 
@@ -232,37 +210,6 @@ class MainActivity : AppCompatActivity() {
         binding.apparatenLijst.adapter = ArrayAdapter(
             this, android.R.layout.simple_list_item_1, getoondeApparaten.values.toList()
         )
-    }
-
-    private fun toonLogbestand() {
-        // Testschrijving, zodat een permissiefout direct zichtbaar is i.p.v.
-        // een verwarrende "bestand niet gevonden".
-        var schrijfFout: String? = null
-        val fout = FileLog.testSchrijven()
-        if (fout != null) schrijfFout = fout.toString()
-
-        val bestand = File(Environment.getExternalStorageDirectory(), "HBmonitor/bridge_debug.log")
-        val inhoud = if (bestand.exists()) {
-            val regels = bestand.readLines()
-            regels.takeLast(200).joinToString("\n")
-        } else {
-            "Nog geen logbestand gevonden op ${bestand.absolutePath}\n\n" +
-                "Testschrijving zonet: ${if (schrijfFout == null) "leek te lukken, maar bestand bestaat alsnog niet \u2014 vermoedelijk een permissieprobleem" else "MISLUKT: $schrijfFout"}\n\n" +
-                "(Verleen eerst bestandstoegang bij stap 2, en start/gebruik de app/bridge minstens één keer.)"
-        }
-
-        val tekstView = TextView(this).apply {
-            text = inhoud
-            setPadding(32, 32, 32, 32)
-            setTextIsSelectable(true)
-        }
-        val scroll = ScrollView(this).apply { addView(tekstView) }
-
-        AlertDialog.Builder(this)
-            .setTitle("Logbestand (laatste 200 regels)")
-            .setView(scroll)
-            .setPositiveButton("Sluiten", null)
-            .show()
     }
 }
 
