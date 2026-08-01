@@ -16,11 +16,16 @@ import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.database.sqlite.SQLiteDatabase
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
@@ -52,6 +57,10 @@ class HrBridgeService : Service() {
 
         private const val RECONNECT_DELAY_MS = 5_000L
         private const val CONNECT_TIMEOUT_MS = 12_000L
+
+        const val ALARM_CHANNEL_ID = "hr_bridge_alarm_channel"
+        const val ALARM_NOTIF_ID = 2
+        private const val INSTELLINGEN_HERLAAD_MS = 15_000L
     }
 
     private var gatt: BluetoothGatt? = null
@@ -61,6 +70,16 @@ class HrBridgeService : Service() {
     private var laatsteBpm: Int? = null
     private var verbonden = false
     private var pogingId = 0
+
+    // Alarminstellingen — standaardwaarden gelijk aan de PWA; worden
+    // overschreven zodra de instellingen-tabel in de gedeelde SQLite-db
+    // gelezen kan worden (die de PWA vult via hr_sync_server.py).
+    private var alarmLimit = 76
+    private var alarmSecondsHigh = 10
+    private var alarmCooldownSec = 30
+    private var aboveSinceMs: Long? = null
+    private var laatsteAlarmMs = 0L
+    private var laatsteInstellingenCheckMs = 0L
 
     private val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ROOT)
 
@@ -240,6 +259,7 @@ class HrBridgeService : Service() {
         if (geschreven) {
             updateNotificatie("Hartslag: $bpm bpm")
         }
+        checkAlarm(bpm)
     }
 
     // -------------------------------------------------------------------
@@ -292,15 +312,30 @@ class HrBridgeService : Service() {
 
     private fun maakNotificatieKanaal() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val nm = getSystemService(NotificationManager::class.java)
+
+            val statusChannel = NotificationChannel(
                 CHANNEL_ID,
                 "HR Bridge status",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Toont de status van de BLE-verbinding met de hartslagband"
             }
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(channel)
+            nm.createNotificationChannel(statusChannel)
+
+            // Apart, hoog-prioriteit kanaal voor de hartslagalarmen zelf:
+            // geluid + trillen, en zichtbaar als heads-up, los van de
+            // stille doorlopende statusmelding hierboven.
+            val alarmChannel = NotificationChannel(
+                ALARM_CHANNEL_ID,
+                "HR Bridge alarm",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Waarschuwing als de hartslag boven de ingestelde grens blijft"
+                enableVibration(true)
+                setBypassDnd(false)
+            }
+            nm.createNotificationChannel(alarmChannel)
         }
     }
 
@@ -322,5 +357,118 @@ class HrBridgeService : Service() {
     private fun updateNotificatie(tekst: String) {
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(NOTIF_ID, bouwNotificatie(tekst))
+    }
+
+    // -------------------------------------------------------------------
+    // Alarm (drempelwaarde ingesteld vanuit de PWA, alarm zelf getriggerd
+    // door deze altijd-actieve service — werkt dus ook als er geen
+    // browser-tab open staat)
+    // -------------------------------------------------------------------
+
+    private fun herlaadInstellingenIndienNodig() {
+        val nu = SystemClock.elapsedRealtime()
+        if (nu - laatsteInstellingenCheckMs < INSTELLINGEN_HERLAAD_MS) return
+        laatsteInstellingenCheckMs = nu
+
+        try {
+            val dbBestand = File(hbmonitorMap(), "hbmonitor.db")
+            if (!dbBestand.exists()) return
+            // Alleen-lezen openen: de tailer en hr_sync_server.py schrijven
+            // er ook naartoe (WAL-modus), dus dit mag gelijktijdig.
+            val db = SQLiteDatabase.openDatabase(
+                dbBestand.path, null, SQLiteDatabase.OPEN_READONLY
+            )
+            db.use {
+                val cursor = it.rawQuery("SELECT key, value FROM instellingen", null)
+                cursor.use { c ->
+                    while (c.moveToNext()) {
+                        val key = c.getString(0)
+                        val waarde = c.getString(1)
+                        when (key) {
+                            "limit" -> waarde.toIntOrNull()?.let { v -> alarmLimit = v }
+                            "secondsHigh" -> waarde.toIntOrNull()?.let { v -> alarmSecondsHigh = v }
+                            "cooldownSec" -> waarde.toIntOrNull()?.let { v -> alarmCooldownSec = v }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Tabel bestaat mogelijk nog niet (PWA heeft nog nooit
+            // instellingen gestuurd) — dan gewoon de standaardwaarden
+            // aanhouden, dit is geen fout om de service voor te laten
+            // crashen.
+            Log.w(TAG, "Alarminstellingen lezen mislukt, standaardwaarden blijven gelden", e)
+        }
+    }
+
+    private fun checkAlarm(bpm: Int) {
+        herlaadInstellingenIndienNodig()
+        val nu = SystemClock.elapsedRealtime()
+
+        if (bpm > alarmLimit) {
+            if (aboveSinceMs == null) aboveSinceMs = nu
+            val hoogVoorMs = nu - (aboveSinceMs ?: nu)
+
+            if (
+                hoogVoorMs >= alarmSecondsHigh * 1000L &&
+                nu - laatsteAlarmMs >= alarmCooldownSec * 1000L
+            ) {
+                laatsteAlarmMs = nu
+                triggerAlarm(bpm)
+            }
+        } else {
+            aboveSinceMs = null
+        }
+    }
+
+    private fun triggerAlarm(bpm: Int) {
+        schrijfEvent("ALARM: hartslag $bpm bpm boven grens $alarmLimit")
+        trilAlarm()
+        toonAlarmNotificatie(bpm)
+    }
+
+    private fun trilAlarm() {
+        try {
+            val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vm = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                vm.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(VIBRATOR_SERVICE) as Vibrator
+            }
+            // Zelfde patroon als het trilalarm in de PWA.
+            val patroon = longArrayOf(0, 900, 250, 900, 250, 1400, 300, 900, 250, 1800)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createWaveform(patroon, -1))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(patroon, -1)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Trillen mislukt", e)
+        }
+    }
+
+    private fun toonAlarmNotificatie(bpm: Int) {
+        try {
+            val pendingIntent = PendingIntent.getActivity(
+                this, 0,
+                Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_IMMUTABLE
+            )
+            val notificatie = NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
+                .setContentTitle("⚠ Hartslag boven grens")
+                .setContentText("$bpm bpm (grens $alarmLimit)")
+                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.notify(ALARM_NOTIF_ID, notificatie)
+        } catch (e: Exception) {
+            Log.e(TAG, "Alarmnotificatie tonen mislukt", e)
+        }
     }
 }
