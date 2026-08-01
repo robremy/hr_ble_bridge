@@ -236,8 +236,10 @@ class HrBridgeService : Service() {
         val contact = if (contactOndersteund && !contactGedetecteerd) 0 else 1
 
         laatsteBpm = bpm
-        schrijfMeting(bpm, contact)
-        updateNotificatie("Hartslag: $bpm bpm")
+        val geschreven = schrijfMeting(bpm, contact)
+        if (geschreven) {
+            updateNotificatie("Hartslag: $bpm bpm")
+        }
     }
 
     // -------------------------------------------------------------------
@@ -251,23 +253,30 @@ class HrBridgeService : Service() {
         return map
     }
 
-    private fun schrijfRegel(bestandsnaam: String, json: String) {
-        try {
+    private fun schrijfRegel(bestandsnaam: String, json: String): Boolean {
+        return try {
             val bestand = File(hbmonitorMap(), bestandsnaam)
             FileOutputStream(bestand, true).use { out ->
                 out.write((json + "\n").toByteArray(Charsets.UTF_8))
             }
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Schrijven naar $bestandsnaam mislukt", e)
+            // Zonder root/logcat-toegang is dit anders onzichtbaar; toon de
+            // echte oorzaak direct in de notificatie zodat je 'm kunt lezen.
+            // De aanroeper laat de "Hartslag: X bpm"-tekst hierna bewust
+            // achterwege zodat deze foutmelding niet meteen overschreven wordt.
+            updateNotificatie("FOUT bij schrijven $bestandsnaam: ${e.javaClass.simpleName}: ${e.message}")
+            false
         }
     }
 
     private fun nu(): String = isoFormat.format(Date())
 
-    private fun schrijfMeting(bpm: Int, contact: Int) {
+    private fun schrijfMeting(bpm: Int, contact: Int): Boolean {
         val ts = nu()
         val json = """{"ts":"$ts","bpm":$bpm,"contact":$contact}"""
-        schrijfRegel("hr_stream.jsonl", json)
+        return schrijfRegel("hr_stream.jsonl", json)
     }
 
     private fun schrijfEvent(bericht: String) {
