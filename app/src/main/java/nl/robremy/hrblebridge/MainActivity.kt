@@ -100,8 +100,20 @@ class MainActivity : AppCompatActivity() {
                 android.Manifest.permission.BLUETOOTH_SCAN,
                 android.Manifest.permission.POST_NOTIFICATIONS
             )
-        } else {
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Android 11-12: klassieke Bluetooth-permissies zijn 'normal'
+            // (automatisch verleend), alleen locatie is hier nog runtime.
+            // Bestandstoegang loopt hier via MANAGE_EXTERNAL_STORAGE (stap 2).
             arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+        } else {
+            // Android 10 en ouder: hier bestaat geen "Alle bestanden"-scherm,
+            // dus WRITE/READ_EXTERNAL_STORAGE moeten hier als runtime-permissie
+            // gevraagd worden, anders faalt elke schrijfpoging stilletjes.
+            arrayOf(
+                android.Manifest.permission.ACCESS_FINE_LOCATION,
+                android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                android.Manifest.permission.READ_EXTERNAL_STORAGE
+            )
         }
     }
 
@@ -115,12 +127,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun vraagAlleBestandenToegangAan() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
-            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-            intent.data = Uri.parse("package:$packageName")
-            startActivity(intent)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
+            } else {
+                binding.statusText.text = "Bestandstoegang al verleend"
+            }
         } else {
-            binding.statusText.text = "Bestandstoegang al verleend"
+            // Op Android 10 en ouder bestaat dit scherm niet; hier is
+            // WRITE/READ_EXTERNAL_STORAGE de juiste (runtime) permissie,
+            // gevraagd via hetzelfde mechanisme als stap 1.
+            val heeftAl = ContextCompat.checkSelfPermission(
+                this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (heeftAl) {
+                binding.statusText.text = "Bestandstoegang al verleend"
+            } else {
+                permissieLauncher.launch(benodigdePermissies())
+            }
         }
     }
 
