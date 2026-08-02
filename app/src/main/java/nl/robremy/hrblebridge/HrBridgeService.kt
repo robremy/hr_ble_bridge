@@ -18,9 +18,9 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.database.sqlite.SQLiteDatabase
 import android.media.AudioAttributes
-import android.media.Ringtone
-import android.media.RingtoneManager
-import android.net.Uri
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
@@ -38,6 +38,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.sin
 
 /**
  * Houdt een BLE GATT-verbinding met de hartslagband vast als foreground
@@ -62,12 +63,12 @@ class HrBridgeService : Service() {
         private const val RECONNECT_DELAY_MS = 5_000L
         private const val CONNECT_TIMEOUT_MS = 12_000L
 
-        // Kanaal-ID gewijzigd (v2): een NotificationChannel is na aanmaken
-        // onveranderlijk qua geluid/trillen-instellingen — als dit kanaal
-        // ooit zonder geluid werd aangemaakt (bv. een oudere installatie),
-        // blijft het voor altijd stil, ongeacht latere codewijzigingen. Een
-        // nieuwe ID forceert een schone aanmaak mét geluid.
-        const val ALARM_CHANNEL_ID = "hr_bridge_alarm_channel_v2"
+        // Kanaal-ID v3: het vorige kanaal (v2) had geluid+trillen op
+        // kanaalniveau aanstaan; dat is na aanmaken onveranderlijk. Nu het
+        // kanaal zelf stil moet zijn (geluid/trillen worden volledig
+        // programmatisch geregeld), is een nieuwe ID nodig om dat op
+        // toestellen die v2 al hadden gehad alsnog door te voeren.
+        const val ALARM_CHANNEL_ID = "hr_bridge_alarm_channel_v3"
         const val ALARM_NOTIF_ID = 2
         private const val INSTELLINGEN_HERLAAD_MS = 15_000L
     }
@@ -89,6 +90,11 @@ class HrBridgeService : Service() {
     private var alarmMode = "vibrate"
     private var aboveSinceMs: Long? = null
     private var laatsteAlarmMs = 0L
+    // Laatst bekende "stop alarm"-tijdstip (epoch ms, wall-clock — vergeleken
+    // met het epoch-tijdstip waarop het huidige alarm begon) uit de
+    // instellingen-tabel. Alleen relevant zolang een alarm actief aan het
+    // afspelen is; zie leesStopAlarmSignaal() en wachtOfGestopt().
+    private var stopAlarmSignaalMs = 0L
     private var laatsteInstellingenCheckMs = 0L
 
     private val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ROOT)
@@ -333,27 +339,21 @@ class HrBridgeService : Service() {
             }
             nm.createNotificationChannel(statusChannel)
 
-            // Apart, hoog-prioriteit kanaal voor de hartslagalarmen zelf:
-            // geluid + trillen, en zichtbaar als heads-up, los van de
-            // stille doorlopende statusmelding hierboven. Geluid wordt hier
-            // expliciet ingesteld i.p.v. te vertrouwen op het platform-
-            // default, en met AudioAttributes USAGE_ALARM zodat het
-            // hoorbaar is ongeacht ringer/media-volumestand.
-            val alarmGeluidUri: Uri =
-                RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_ALARM)
-                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            val alarmAudioAttributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ALARM)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build()
+            // Apart, hoog-prioriteit kanaal voor de hartslagalarmen zelf,
+            // zichtbaar als heads-up, los van de stille doorlopende
+            // statusmelding hierboven. Het kanaal zelf blijft bewust stil
+            // (geen geluid/trillen) — dat wordt volledig door
+            // triggerAlarm() zelf geregeld via speelAlarmGeluid()/
+            // trilAlarm(), zodat er niet zowel het kanaal-standaardgeluid
+            // als onze eigen toon/trilpatroon tegelijk afgaan.
             val alarmChannel = NotificationChannel(
                 ALARM_CHANNEL_ID,
                 "HR Bridge alarm",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Waarschuwing als de hartslag boven de ingestelde grens blijft"
-                enableVibration(true)
-                setSound(alarmGeluidUri, alarmAudioAttributes)
+                enableVibration(false)
+                setSound(null, null)
                 setBypassDnd(false)
             }
             nm.createNotificationChannel(alarmChannel)
@@ -410,6 +410,7 @@ class HrBridgeService : Service() {
                             "secondsHigh" -> waarde.toIntOrNull()?.let { v -> alarmSecondsHigh = v }
                             "cooldownSec" -> waarde.toIntOrNull()?.let { v -> alarmCooldownSec = v }
                             "mode" -> if (waarde == "audio" || waarde == "vibrate") alarmMode = waarde
+                            "stopAlarmMs" -> waarde.toLongOrNull()?.let { v -> stopAlarmSignaalMs = v }
                         }
                     }
                 }
@@ -420,6 +421,53 @@ class HrBridgeService : Service() {
             // aanhouden, dit is geen fout om de service voor te laten
             // crashen.
             Log.w(TAG, "Alarminstellingen lezen mislukt, standaardwaarden blijven gelden", e)
+        }
+    }
+
+    // Snelle, ongethrottelde lezing van alleen de stopAlarmMs-waarde. Wordt
+    // uitsluitend aangeroepen terwijl een alarm actief aan het afspelen is
+    // (zie wachtOfGestopt()) — vandaar geen 15s-drempel zoals bij de
+    // reguliere instellingen, anders komt "Stop alarm" te laat aan om nog
+    // iets uit te maken.
+    private fun leesStopAlarmSignaal(): Long {
+        return try {
+            val dbBestand = File(hbmonitorMap(), "hbmonitor.db")
+            if (!dbBestand.exists()) return stopAlarmSignaalMs
+            val db = SQLiteDatabase.openDatabase(
+                dbBestand.path, null, SQLiteDatabase.OPEN_READONLY
+            )
+            db.use {
+                val cursor = it.rawQuery(
+                    "SELECT value FROM instellingen WHERE key = ?", arrayOf("stopAlarmMs")
+                )
+                cursor.use { c ->
+                    if (c.moveToFirst()) {
+                        c.getString(0)?.toLongOrNull()?.let { v -> stopAlarmSignaalMs = v }
+                    }
+                }
+            }
+            stopAlarmSignaalMs
+        } catch (e: Exception) {
+            stopAlarmSignaalMs
+        }
+    }
+
+    // Speelt een alarm-actie (trillen of geluid) af in korte stapjes, en
+    // controleert tussendoor of er een nieuwer stop-signaal is binnengekomen
+    // dan het moment waarop dit alarm begon. Zo ja: stopActie() aanroepen en
+    // meteen stoppen, in plaats van de volledige duur uit te zitten.
+    private fun wachtOfGestopt(totaalMs: Long, alarmStartMs: Long, stopActie: () -> Unit) {
+        val stapMs = 250L
+        var verstrekenMs = 0L
+        while (verstrekenMs < totaalMs) {
+            if (leesStopAlarmSignaal() > alarmStartMs) {
+                stopActie()
+                schrijfEvent("Alarm gestopt door gebruiker (Stop alarm)")
+                return
+            }
+            val slaap = minOf(stapMs, totaalMs - verstrekenMs)
+            Thread.sleep(slaap)
+            verstrekenMs += slaap
         }
     }
 
@@ -445,51 +493,115 @@ class HrBridgeService : Service() {
 
     private fun triggerAlarm(bpm: Int) {
         schrijfEvent("ALARM: hartslag $bpm bpm boven grens $alarmLimit ($alarmMode)")
+        val alarmStartMs = System.currentTimeMillis()
         // Zelfde als de PWA: audio-modus en trilmodus zijn elkaars
         // alternatief, niet allebei tegelijk (zie triggerAlarm() in
         // index.html).
         if (alarmMode == "audio") {
-            speelAlarmGeluid()
+            speelAlarmGeluid(alarmStartMs)
         } else {
-            trilAlarm()
+            trilAlarm(alarmStartMs)
         }
         toonAlarmNotificatie(bpm)
     }
 
-    private fun speelAlarmGeluid() {
-        try {
-            val uri: Uri =
-                RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_ALARM)
-                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            val ringtone: Ringtone = RingtoneManager.getRingtone(this, uri)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                ringtone.audioAttributes = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
+    private fun speelAlarmGeluid(alarmStartMs: Long) {
+        // Draait op een eigen thread: het genereren en synchroon afspelen
+        // van ~3,75 s PCM-audio, plus het tussendoor pollen op een
+        // stop-signaal, hoort niet op de Handler/main-looper thuis.
+        Thread {
+            try {
+                speelSynthetischAlarmToon(alarmStartMs)
+            } catch (e: Exception) {
+                Log.e(TAG, "Alarmgeluid afspelen mislukt", e)
+                // Als geluid afspelen om wat voor reden dan ook mislukt, toch
+                // trillen als terugval zodat de gebruiker hoe dan ook
+                // gewaarschuwd wordt.
+                handler.post { trilAlarm(alarmStartMs) }
             }
-            ringtone.play()
-            // Ringtone speelt asynchroon en stopt vanzelf; na een paar
-            // seconden expliciet stoppen voorkomt dat een lang geluidsbestand
-            // (bv. een volledig muzieknummer als alarmtoon) eindeloos
-            // doorspeelt.
-            handler.postDelayed({
-                try {
-                    if (ringtone.isPlaying) ringtone.stop()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Alarmgeluid stoppen mislukt", e)
+        }.start()
+    }
+
+    // Zelfde alarmtoon als de PWA (beepOnce() in index.html): een 950 Hz
+    // toon, 500 ms aan / 250 ms stil, 5 keer herhaald met 0,35 gain, zodat
+    // de bridge-app en de browser-PWA identiek klinken in plaats van het
+    // ene een systeem-ringtone en het andere een gesynthetiseerde piep.
+    private fun speelSynthetischAlarmToon(alarmStartMs: Long) {
+        val sampleRate = 44100
+        val frequentieHz = 950.0
+        val toonDuurMs = 500
+        val stilteDuurMs = 250
+        val herhalingen = 5
+        val amplitude = 0.35 * Short.MAX_VALUE
+        val fadeDuurSamples = sampleRate / 100 // 10 ms in/uit om tik-geluid te voorkomen
+
+        val toonSamples = sampleRate * toonDuurMs / 1000
+        val stilteSamples = sampleRate * stilteDuurMs / 1000
+        val buffer = ShortArray(herhalingen * (toonSamples + stilteSamples))
+
+        var offset = 0
+        repeat(herhalingen) {
+            for (i in 0 until toonSamples) {
+                val fade = when {
+                    i < fadeDuurSamples -> i.toDouble() / fadeDuurSamples
+                    i > toonSamples - fadeDuurSamples -> (toonSamples - i).toDouble() / fadeDuurSamples
+                    else -> 1.0
                 }
-            }, 5_000L)
-        } catch (e: Exception) {
-            Log.e(TAG, "Alarmgeluid afspelen mislukt", e)
-            // Als geluid afspelen om wat voor reden dan ook mislukt (bv.
-            // geen geluidsbron beschikbaar), toch trillen als terugval zodat
-            // de gebruiker hoe dan ook gewaarschuwd wordt.
-            trilAlarm()
+                val waarde = amplitude * fade * sin(2.0 * Math.PI * frequentieHz * i / sampleRate)
+                buffer[offset + i] = waarde.toInt().toShort()
+            }
+            offset += toonSamples + stilteSamples // stiltesamples blijven 0 (ShortArray-default)
+        }
+
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ALARM)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+        val audioFormat = AudioFormat.Builder()
+            .setSampleRate(sampleRate)
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+            .build()
+        val bufferBytes = buffer.size * 2
+        val minBufferSize = AudioTrack.getMinBufferSize(
+            sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
+        )
+
+        val audioTrack = AudioTrack(
+            audioAttributes,
+            audioFormat,
+            maxOf(minBufferSize, bufferBytes),
+            AudioTrack.MODE_STATIC,
+            AudioManager.AUDIO_SESSION_ID_GENERATE
+        )
+        try {
+            audioTrack.write(buffer, 0, buffer.size)
+            audioTrack.play()
+            // In plaats van de volledige duur blind uit te zitten: elke
+            // 250ms pollen op een stop-signaal, zodat "Stop alarm" in de
+            // PWA de toon binnen ~250ms daadwerkelijk afbreekt.
+            wachtOfGestopt(
+                (herhalingen * (toonDuurMs + stilteDuurMs)).toLong(),
+                alarmStartMs
+            ) {
+                try {
+                    audioTrack.stop()
+                } catch (e: Exception) {
+                    Log.e(TAG, "AudioTrack vroegtijdig stoppen mislukt", e)
+                }
+                annuleerAlarmNotificatie()
+            }
+        } finally {
+            try {
+                audioTrack.stop()
+            } catch (e: Exception) {
+                Log.e(TAG, "AudioTrack stoppen mislukt", e)
+            }
+            audioTrack.release()
         }
     }
 
-    private fun trilAlarm() {
+    private fun trilAlarm(alarmStartMs: Long) {
         try {
             val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vm = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
@@ -500,14 +612,37 @@ class HrBridgeService : Service() {
             }
             // Zelfde patroon als het trilalarm in de PWA.
             val patroon = longArrayOf(0, 900, 250, 900, 250, 1400, 300, 900, 250, 1800)
+            val totaalMs = patroon.sum()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 vibrator.vibrate(VibrationEffect.createWaveform(patroon, -1))
             } else {
                 @Suppress("DEPRECATION")
                 vibrator.vibrate(patroon, -1)
             }
+            // vibrate() keert meteen terug (het patroon loopt systeem-kant
+            // door); op een eigen thread pollen op een stop-signaal zodat
+            // "Stop alarm" in de PWA het trillen binnen ~250ms afbreekt via
+            // vibrator.cancel(), in plaats van de volle ~7s uit te zitten.
+            Thread {
+                wachtOfGestopt(totaalMs, alarmStartMs) {
+                    try {
+                        vibrator.cancel()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Trillen vroegtijdig stoppen mislukt", e)
+                    }
+                    annuleerAlarmNotificatie()
+                }
+            }.start()
         } catch (e: Exception) {
             Log.e(TAG, "Trillen mislukt", e)
+        }
+    }
+
+    private fun annuleerAlarmNotificatie() {
+        try {
+            getSystemService(NotificationManager::class.java).cancel(ALARM_NOTIF_ID)
+        } catch (e: Exception) {
+            Log.e(TAG, "Alarmnotificatie annuleren mislukt", e)
         }
     }
 
