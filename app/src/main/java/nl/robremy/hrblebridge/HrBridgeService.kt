@@ -17,6 +17,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.database.sqlite.SQLiteDatabase
+import android.media.AudioAttributes
+import android.media.Ringtone
+import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
@@ -58,7 +62,12 @@ class HrBridgeService : Service() {
         private const val RECONNECT_DELAY_MS = 5_000L
         private const val CONNECT_TIMEOUT_MS = 12_000L
 
-        const val ALARM_CHANNEL_ID = "hr_bridge_alarm_channel"
+        // Kanaal-ID gewijzigd (v2): een NotificationChannel is na aanmaken
+        // onveranderlijk qua geluid/trillen-instellingen — als dit kanaal
+        // ooit zonder geluid werd aangemaakt (bv. een oudere installatie),
+        // blijft het voor altijd stil, ongeacht latere codewijzigingen. Een
+        // nieuwe ID forceert een schone aanmaak mét geluid.
+        const val ALARM_CHANNEL_ID = "hr_bridge_alarm_channel_v2"
         const val ALARM_NOTIF_ID = 2
         private const val INSTELLINGEN_HERLAAD_MS = 15_000L
     }
@@ -77,6 +86,7 @@ class HrBridgeService : Service() {
     private var alarmLimit = 76
     private var alarmSecondsHigh = 10
     private var alarmCooldownSec = 30
+    private var alarmMode = "vibrate"
     private var aboveSinceMs: Long? = null
     private var laatsteAlarmMs = 0L
     private var laatsteInstellingenCheckMs = 0L
@@ -325,7 +335,17 @@ class HrBridgeService : Service() {
 
             // Apart, hoog-prioriteit kanaal voor de hartslagalarmen zelf:
             // geluid + trillen, en zichtbaar als heads-up, los van de
-            // stille doorlopende statusmelding hierboven.
+            // stille doorlopende statusmelding hierboven. Geluid wordt hier
+            // expliciet ingesteld i.p.v. te vertrouwen op het platform-
+            // default, en met AudioAttributes USAGE_ALARM zodat het
+            // hoorbaar is ongeacht ringer/media-volumestand.
+            val alarmGeluidUri: Uri =
+                RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_ALARM)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val alarmAudioAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ALARM)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
             val alarmChannel = NotificationChannel(
                 ALARM_CHANNEL_ID,
                 "HR Bridge alarm",
@@ -333,6 +353,7 @@ class HrBridgeService : Service() {
             ).apply {
                 description = "Waarschuwing als de hartslag boven de ingestelde grens blijft"
                 enableVibration(true)
+                setSound(alarmGeluidUri, alarmAudioAttributes)
                 setBypassDnd(false)
             }
             nm.createNotificationChannel(alarmChannel)
@@ -388,6 +409,7 @@ class HrBridgeService : Service() {
                             "limit" -> waarde.toIntOrNull()?.let { v -> alarmLimit = v }
                             "secondsHigh" -> waarde.toIntOrNull()?.let { v -> alarmSecondsHigh = v }
                             "cooldownSec" -> waarde.toIntOrNull()?.let { v -> alarmCooldownSec = v }
+                            "mode" -> if (waarde == "audio" || waarde == "vibrate") alarmMode = waarde
                         }
                     }
                 }
@@ -422,9 +444,49 @@ class HrBridgeService : Service() {
     }
 
     private fun triggerAlarm(bpm: Int) {
-        schrijfEvent("ALARM: hartslag $bpm bpm boven grens $alarmLimit")
-        trilAlarm()
+        schrijfEvent("ALARM: hartslag $bpm bpm boven grens $alarmLimit ($alarmMode)")
+        // Zelfde als de PWA: audio-modus en trilmodus zijn elkaars
+        // alternatief, niet allebei tegelijk (zie triggerAlarm() in
+        // index.html).
+        if (alarmMode == "audio") {
+            speelAlarmGeluid()
+        } else {
+            trilAlarm()
+        }
         toonAlarmNotificatie(bpm)
+    }
+
+    private fun speelAlarmGeluid() {
+        try {
+            val uri: Uri =
+                RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_ALARM)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val ringtone: Ringtone = RingtoneManager.getRingtone(this, uri)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                ringtone.audioAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ALARM)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            }
+            ringtone.play()
+            // Ringtone speelt asynchroon en stopt vanzelf; na een paar
+            // seconden expliciet stoppen voorkomt dat een lang geluidsbestand
+            // (bv. een volledig muzieknummer als alarmtoon) eindeloos
+            // doorspeelt.
+            handler.postDelayed({
+                try {
+                    if (ringtone.isPlaying) ringtone.stop()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Alarmgeluid stoppen mislukt", e)
+                }
+            }, 5_000L)
+        } catch (e: Exception) {
+            Log.e(TAG, "Alarmgeluid afspelen mislukt", e)
+            // Als geluid afspelen om wat voor reden dan ook mislukt (bv.
+            // geen geluidsbron beschikbaar), toch trillen als terugval zodat
+            // de gebruiker hoe dan ook gewaarschuwd wordt.
+            trilAlarm()
+        }
     }
 
     private fun trilAlarm() {
