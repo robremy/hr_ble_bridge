@@ -56,6 +56,7 @@ class HrBridgeService : Service() {
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         private const val RECONNECT_DELAY_MS = 5_000L
+        private const val RECONNECT_MAX_DELAY_MS = 120_000L // cap op 2 min
         private const val CONNECT_TIMEOUT_MS = 12_000L
 
         const val ALARM_CHANNEL_ID = "hr_bridge_alarm_channel"
@@ -94,6 +95,13 @@ class HrBridgeService : Service() {
     // heeft standgehouden — nodig om patronen zoals "valt na 3-4 uur weg"
     // te onderscheiden van willekeurige drops.
     private var verbindingTotStandMs: Long? = null
+
+    // Aantal opeenvolgende mislukte (her)verbindpogingen sinds de laatste
+    // geslaagde STATE_CONNECTED. Gebruikt voor exponentiële backoff, zodat
+    // een band die lang buiten bereik is (bv. 's nachts elders aan het
+    // opladen) niet elke 5s de radio blijft belasten.
+    private var opeenvolgendeMislukkingen = 0
+    private var maxBackoffGelogd = false
 
     // Alarminstellingen — standaardwaarden gelijk aan de PWA; worden
     // overschreven zodra de instellingen-tabel in de gedeelde SQLite-db
@@ -195,9 +203,28 @@ class HrBridgeService : Service() {
 
     private fun plannerHerverbind() {
         if (stoppedByUser) return
+
+        // Exponentiële backoff: 5s, 10s, 20s, 40s, 80s, daarna gecapt op
+        // RECONNECT_MAX_DELAY_MS. Voorkomt dat de radio elke 5s belast blijft
+        // worden terwijl de band voor langere tijd buiten bereik is (bv.
+        // 's nachts elders aan het opladen). Teller wordt gereset zodra een
+        // verbinding weer lukt (STATE_CONNECTED).
+        val factor = 1L shl opeenvolgendeMislukkingen.coerceAtMost(10) // voorkom overflow
+        val delay = (RECONNECT_DELAY_MS * factor).coerceAtMost(RECONNECT_MAX_DELAY_MS)
+        opeenvolgendeMislukkingen++
+
+        // Alleen loggen op het moment dat de cap voor het eerst bereikt
+        // wordt, niet bij elke losse poging erna — anders vervuilt dit de
+        // events-log net zo hard als de situatie die het moest voorkomen.
+        if (delay >= RECONNECT_MAX_DELAY_MS && !maxBackoffGelogd) {
+            maxBackoffGelogd = true
+            schrijfEvent("Herverbinden bereikt max. interval (${delay / 1000}s), band mogelijk lang buiten bereik")
+        }
+
+        Log.i(TAG, "Volgende herverbindpoging over ${delay}ms (mislukking #$opeenvolgendeMislukkingen)")
         handler.postDelayed({
             macAddress?.let { verbind(it) }
-        }, RECONNECT_DELAY_MS)
+        }, delay)
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
@@ -208,6 +235,8 @@ class HrBridgeService : Service() {
                     Log.i(TAG, "GATT verbonden (status=$status), services ontdekken...")
                     verbonden = true
                     verbindingTotStandMs = SystemClock.elapsedRealtime()
+                    opeenvolgendeMislukkingen = 0
+                    maxBackoffGelogd = false
                     schrijfEvent("BLE verbonden met ${g.device.name ?: g.device.address}")
                     updateNotificatie("Verbonden. Services ontdekken...")
                     g.discoverServices()
