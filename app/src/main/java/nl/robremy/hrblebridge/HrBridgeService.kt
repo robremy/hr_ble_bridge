@@ -17,6 +17,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.database.sqlite.SQLiteDatabase
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
@@ -109,6 +113,10 @@ class HrBridgeService : Service() {
     private var alarmLimit = 76
     private var alarmSecondsHigh = 10
     private var alarmCooldownSec = 30
+    // "vibrate" of "audio" — zelfde waarden als alarmMode in de PWA (zie
+    // toggleAlarmMode() in index.html). Werd voorheen niet gelezen, dus
+    // deze service trilde altijd, ongeacht wat de PWA-knop toonde.
+    private var alarmMode = "vibrate"
     private var aboveSinceMs: Long? = null
     private var laatsteAlarmMs = 0L
     private var laatsteInstellingenCheckMs = 0L
@@ -471,6 +479,7 @@ class HrBridgeService : Service() {
                             "limit" -> waarde.toIntOrNull()?.let { v -> alarmLimit = v }
                             "secondsHigh" -> waarde.toIntOrNull()?.let { v -> alarmSecondsHigh = v }
                             "cooldownSec" -> waarde.toIntOrNull()?.let { v -> alarmCooldownSec = v }
+                            "mode" -> if (waarde == "audio" || waarde == "vibrate") alarmMode = waarde
                         }
                     }
                 }
@@ -505,9 +514,82 @@ class HrBridgeService : Service() {
     }
 
     private fun triggerAlarm(bpm: Int) {
-        schrijfEvent("ALARM: hartslag $bpm bpm boven grens $alarmLimit")
-        trilAlarm()
+        schrijfEvent("ALARM: hartslag $bpm bpm boven grens $alarmLimit (modus: $alarmMode)")
+        if (alarmMode == "audio") {
+            geluidAlarm()
+        } else {
+            trilAlarm()
+        }
         toonAlarmNotificatie(bpm)
+    }
+
+    // Zelfde 950 Hz-toon en herhaalpatroon (5x 500ms, 250ms stilte) als
+    // triggerAudioAlarm()/beepOnce() in de PWA, maar dan met AudioTrack
+    // i.p.v. Web Audio, want deze service draait ook zonder open browser-
+    // tab. Genereert de sinusgolf zelf als 16-bit PCM — geen los geluid-
+    // bestand nodig.
+    private fun geluidAlarm() {
+        Thread {
+            try {
+                val sampleRate = 44100
+                val frequentieHz = 950.0
+                val duurMs = 500
+                val stilteMs = 250L
+                val aantalHerhalingen = 5
+
+                val aantalSamples = sampleRate * duurMs / 1000
+                val buffer = ShortArray(aantalSamples)
+                for (i in buffer.indices) {
+                    val t = i.toDouble() / sampleRate
+                    // Kleine fade-in/fade-out (eerste/laatste ~5ms) om
+                    // een hoorbare "klik" bij start/stop van elke beep
+                    // te voorkomen.
+                    val fadeSamples = sampleRate / 200
+                    val fade = when {
+                        i < fadeSamples -> i.toDouble() / fadeSamples
+                        i > aantalSamples - fadeSamples -> (aantalSamples - i).toDouble() / fadeSamples
+                        else -> 1.0
+                    }
+                    val waarde = Math.sin(2.0 * Math.PI * frequentieHz * t) * fade
+                    buffer[i] = (waarde * Short.MAX_VALUE * 0.7).toInt().toShort()
+                }
+
+                val minBufSize = AudioTrack.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                val audioTrack = AudioTrack(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build(),
+                    AudioFormat.Builder()
+                        .setSampleRate(sampleRate)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build(),
+                    maxOf(minBufSize, buffer.size * 2),
+                    AudioTrack.MODE_STATIC,
+                    AudioManager.AUDIO_SESSION_ID_GENERATE
+                )
+
+                try {
+                    audioTrack.write(buffer, 0, buffer.size)
+                    for (herhaling in 0 until aantalHerhalingen) {
+                        audioTrack.play()
+                        Thread.sleep(duurMs.toLong())
+                        audioTrack.stop()
+                        audioTrack.reloadStaticData()
+                        if (herhaling < aantalHerhalingen - 1) Thread.sleep(stilteMs)
+                    }
+                } finally {
+                    audioTrack.release()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Audio alarm mislukt", e)
+            }
+        }.start()
     }
 
     private fun trilAlarm() {
