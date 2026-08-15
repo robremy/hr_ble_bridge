@@ -514,13 +514,63 @@ class HrBridgeService : Service() {
     }
 
     private fun triggerAlarm(bpm: Int) {
+        // Wall-clock tijdstip (Date.now()-compatibel), niet elapsedRealtime:
+        // stopAlarmMs komt van de PWA als Date.now() en moet hiermee
+        // vergeleken worden, niet met de elapsedRealtime-klok die verder in
+        // deze service voor interne timing gebruikt wordt.
+        val alarmTriggeredWallMs = System.currentTimeMillis()
         schrijfEvent("ALARM: hartslag $bpm bpm boven grens $alarmLimit (modus: $alarmMode)")
         if (alarmMode == "audio") {
-            geluidAlarm()
+            geluidAlarm(alarmTriggeredWallMs)
         } else {
-            trilAlarm()
+            trilAlarm(alarmTriggeredWallMs)
         }
         toonAlarmNotificatie(bpm)
+    }
+
+    // Snelle, ongethrottelde losse lezing van het stopsignaal (i.t.t.
+    // herlaadInstellingenIndienNodig(), die door INSTELLINGEN_HERLAAD_MS
+    // gethrottled wordt) — nodig omdat "Stop alarm" in de PWA binnen
+    // ~250ms effect moet hebben op een lopend alarm.
+    private fun leesStopAlarmSignaal(): Long {
+        return try {
+            val dbBestand = File(hbmonitorMap(), "hbmonitor.db")
+            if (!dbBestand.exists()) return 0L
+            val db = SQLiteDatabase.openDatabase(
+                dbBestand.path, null, SQLiteDatabase.OPEN_READONLY
+            )
+            db.use {
+                val cursor = it.rawQuery(
+                    "SELECT value FROM instellingen WHERE key = ?",
+                    arrayOf("stopAlarmMs")
+                )
+                cursor.use { c ->
+                    if (c.moveToFirst()) c.getString(0)?.toLongOrNull() ?: 0L else 0L
+                }
+            }
+        } catch (e: Exception) {
+            0L
+        }
+    }
+
+    // Wacht in stapjes van stapMs tot totaalMs is verstreken, of tot er een
+    // vers stopsignaal binnenkomt (stopAlarmMs nieuwer dan het moment
+    // waarop dit specifieke alarm afging — zo negeren we een oud
+    // stopsignaal van een vorig alarm). Retourneert true bij vroegtijdig
+    // stoppen, zodat de aanroeper de afspeel-/trilcyclus kan afbreken.
+    private fun wachtOfGestopt(
+        alarmTriggeredWallMs: Long,
+        totaalMs: Long,
+        stapMs: Long = 250L
+    ): Boolean {
+        var verstrekenMs = 0L
+        while (verstrekenMs < totaalMs) {
+            val stap = minOf(stapMs, totaalMs - verstrekenMs)
+            Thread.sleep(stap)
+            verstrekenMs += stap
+            if (leesStopAlarmSignaal() > alarmTriggeredWallMs) return true
+        }
+        return false
     }
 
     // Zelfde 950 Hz-toon en herhaalpatroon (5x 500ms, 250ms stilte) als
@@ -528,16 +578,16 @@ class HrBridgeService : Service() {
     // i.p.v. Web Audio, want deze service draait ook zonder open browser-
     // tab. Genereert de sinusgolf zelf als 16-bit PCM — geen los geluid-
     // bestand nodig.
-    private fun geluidAlarm() {
+    private fun geluidAlarm(alarmTriggeredWallMs: Long) {
         Thread {
             try {
                 val sampleRate = 44100
                 val frequentieHz = 950.0
-                val duurMs = 500
+                val duurMs = 500L
                 val stilteMs = 250L
                 val aantalHerhalingen = 5
 
-                val aantalSamples = sampleRate * duurMs / 1000
+                val aantalSamples = (sampleRate * duurMs / 1000).toInt()
                 val buffer = ShortArray(aantalSamples)
                 for (i in buffer.indices) {
                     val t = i.toDouble() / sampleRate
@@ -578,10 +628,13 @@ class HrBridgeService : Service() {
                     audioTrack.write(buffer, 0, buffer.size)
                     for (herhaling in 0 until aantalHerhalingen) {
                         audioTrack.play()
-                        Thread.sleep(duurMs.toLong())
+                        val gestopt = wachtOfGestopt(alarmTriggeredWallMs, duurMs)
                         audioTrack.stop()
+                        if (gestopt) break
                         audioTrack.reloadStaticData()
-                        if (herhaling < aantalHerhalingen - 1) Thread.sleep(stilteMs)
+                        if (herhaling < aantalHerhalingen - 1) {
+                            if (wachtOfGestopt(alarmTriggeredWallMs, stilteMs)) break
+                        }
                     }
                 } finally {
                     audioTrack.release()
@@ -592,7 +645,7 @@ class HrBridgeService : Service() {
         }.start()
     }
 
-    private fun trilAlarm() {
+    private fun trilAlarm(alarmTriggeredWallMs: Long) {
         try {
             val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vm = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
@@ -609,6 +662,20 @@ class HrBridgeService : Service() {
                 @Suppress("DEPRECATION")
                 vibrator.vibrate(patroon, -1)
             }
+
+            // Los wachtthreadje dat het stopsignaal in de gaten houdt zolang
+            // het patroon nog loopt, en de trilling desnoods vroegtijdig
+            // afbreekt — vibrator.vibrate() zelf is fire-and-forget en kan
+            // niet "van buitenaf" onderbroken worden zonder cancel().
+            Thread {
+                if (wachtOfGestopt(alarmTriggeredWallMs, patroon.sum())) {
+                    try {
+                        vibrator.cancel()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Trillen annuleren mislukt", e)
+                    }
+                }
+            }.start()
         } catch (e: Exception) {
             Log.e(TAG, "Trillen mislukt", e)
         }
