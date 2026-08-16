@@ -16,13 +16,11 @@ import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.database.sqlite.SQLiteDatabase
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
-import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -32,8 +30,6 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -43,9 +39,11 @@ import java.util.UUID
  * Houdt een BLE GATT-verbinding met de hartslagband vast als foreground
  * service (overleeft achtergrond-throttling, in tegenstelling tot een
  * Chrome-tab op de achtergrond). Metingen en verbindingsevents worden
- * append-only weggeschreven naar gedeelde opslag (/HBmonitor/...), zodat
- * een los Termux-script (de "tailer") ze kan uitlezen en in SQLite kan
- * zetten.
+ * rechtstreeks in SQLite weggeschreven via HbmonitorDb (geen JSONL-
+ * tussenstap meer, dus ook geen los Termux-tailproces nodig). Deze
+ * service start ook de embedded HrHttpServer, die dezelfde REST-API
+ * aanbiedt als het vroegere hr_sync_server.py, zodat de PWA verder
+ * ongewijzigd blijft werken.
  */
 class HrBridgeService : Service() {
 
@@ -83,6 +81,10 @@ class HrBridgeService : Service() {
 
         private fun gattStatusNaam(status: Int): String =
             GATT_STATUS_NAMEN[status] ?: "onbekende status"
+
+        // Alleen gebruikt door NanoHTTPD's start()-signatuur, niet
+        // gerelateerd aan de BLE-connectietimeouts hierboven.
+        private const val HTTP_START_TIMEOUT_MS = 5_000
     }
 
     private var gatt: BluetoothGatt? = null
@@ -109,7 +111,8 @@ class HrBridgeService : Service() {
 
     // Alarminstellingen — standaardwaarden gelijk aan de PWA; worden
     // overschreven zodra de instellingen-tabel in de gedeelde SQLite-db
-    // gelezen kan worden (die de PWA vult via hr_sync_server.py).
+    // gelezen kan worden (die de PWA vult via HrHttpServer's
+    // POST /api/instellingen).
     private var alarmLimit = 76
     private var alarmSecondsHigh = 10
     private var alarmCooldownSec = 30
@@ -122,6 +125,13 @@ class HrBridgeService : Service() {
     private var laatsteInstellingenCheckMs = 0L
 
     private val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ROOT)
+
+    // Embedded HTTP-server (vervangt hr_sync_server.py). Start/stopt met
+    // de service, want zonder BLE-verbinding heeft de PWA ook niets te
+    // syncen — maar de server blijft ook nuttig als alleen historische
+    // data/instellingen opgevraagd worden terwijl de band even niet
+    // verbonden is, dus hij draait onafhankelijk van de GATT-status.
+    private var httpServer: HrHttpServer? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -138,6 +148,8 @@ class HrBridgeService : Service() {
         } else {
             startForeground(NOTIF_ID, notificatie)
         }
+
+        startHttpServerIndienNodig()
 
         macAddress?.let { verbind(it) } ?: run {
             Log.e(TAG, "Geen MAC-adres opgegeven, service stopt")
@@ -156,7 +168,28 @@ class HrBridgeService : Service() {
         gatt?.close()
         gatt = null
         schrijfEvent("Bridge-service gestopt")
+        httpServer?.stop()
+        httpServer = null
+        HbmonitorDb.sluit()
         super.onDestroy()
+    }
+
+    private fun startHttpServerIndienNodig() {
+        if (httpServer != null) return
+        try {
+            val server = HrHttpServer(applicationContext)
+            // 0.0.0.0 (NanoHTTPD default constructor zonder host-arg) i.p.v.
+            // alleen 127.0.0.1: laat ook een tweede toestel op hetzelfde
+            // WiFi-netwerk verbinden — zelfde afweging als voorheen in
+            // hr_sync_server.py, inclusief hetzelfde ontbreken van
+            // authenticatie op deze endpoints.
+            server.start(HTTP_START_TIMEOUT_MS, false)
+            httpServer = server
+            Log.i(TAG, "HTTP-server gestart op poort ${HrHttpServer.STANDAARD_POORT}")
+        } catch (e: Exception) {
+            Log.e(TAG, "HTTP-server starten mislukt", e)
+            schrijfEvent("HTTP-server starten mislukt: ${e.javaClass.simpleName}: ${e.message}")
+        }
     }
 
     // -------------------------------------------------------------------
@@ -329,62 +362,45 @@ class HrBridgeService : Service() {
     }
 
     // -------------------------------------------------------------------
-    // Wegschrijven naar gedeelde opslag (JSON Lines, append-only)
+    // Wegschrijven naar SQLite (rechtstreeks, geen JSONL/tailer meer)
     // -------------------------------------------------------------------
-
-    private fun hbmonitorMap(): File {
-        val basis = Environment.getExternalStorageDirectory()
-        val map = File(basis, "HBmonitor")
-        if (!map.exists()) map.mkdirs()
-        return map
-    }
-
-    private fun schrijfRegel(bestandsnaam: String, json: String): Boolean {
-        return try {
-            val bestand = File(hbmonitorMap(), bestandsnaam)
-            FileOutputStream(bestand, true).use { out ->
-                out.write((json + "\n").toByteArray(Charsets.UTF_8))
-            }
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Schrijven naar $bestandsnaam mislukt", e)
-            // Zonder root/logcat-toegang is dit anders onzichtbaar; toon de
-            // echte oorzaak direct in de notificatie zodat je 'm kunt lezen.
-            // De aanroeper laat de "Hartslag: X bpm"-tekst hierna bewust
-            // achterwege zodat deze foutmelding niet meteen overschreven wordt.
-            updateNotificatie("FOUT bij schrijven $bestandsnaam: ${e.javaClass.simpleName}: ${e.message}")
-            false
-        }
-    }
 
     private fun nu(): String = isoFormat.format(Date())
 
     private fun schrijfMeting(bpm: Int, contact: Int): Boolean {
-        val ts = nu()
-        val json = """{"ts":"$ts","bpm":$bpm,"contact":$contact}"""
-        return schrijfRegel("hr_stream.jsonl", json)
+        return try {
+            HbmonitorDb.voegMetingToe(applicationContext, nu(), bpm, contact)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Wegschrijven meting mislukt", e)
+            // Zonder root/logcat-toegang is dit anders onzichtbaar; toon de
+            // echte oorzaak direct in de notificatie zodat je 'm kunt lezen.
+            // De aanroeper laat de "Hartslag: X bpm"-tekst hierna bewust
+            // achterwege zodat deze foutmelding niet meteen overschreven wordt.
+            updateNotificatie("FOUT bij wegschrijven meting: ${e.javaClass.simpleName}: ${e.message}")
+            false
+        }
     }
 
     private fun schrijfEvent(bericht: String) {
-        val ts = nu()
-        val veilig = bericht.replace("\"", "'")
-        val json = """{"ts":"$ts","bericht":"$veilig"}"""
-        schrijfRegel("hr_events.jsonl", json)
+        try {
+            HbmonitorDb.voegEventToe(applicationContext, nu(), bericht)
+        } catch (e: Exception) {
+            Log.e(TAG, "Wegschrijven event mislukt", e)
+        }
     }
 
     /**
      * Structured disconnect-event met losse velden voor status/duur, zodat
      * dit later machinaal te analyseren is (bv. "valt de verbinding steeds
      * na ~3-4 uur weg, en met welke statuscode?") zonder tekst te moeten
-     * parsen. Blijft ook via schrijfEvent() zichtbaar in de bestaande
-     * events-tijdlijn, met dezelfde informatie in leesbare vorm.
+     * parsen. Voorheen een apart JSON-veldenobject in hr_events.jsonl; nu
+     * gewoon een leesbare event-regel in dezelfde `events`-tabel, want een
+     * los "type":"disconnect"-veld had in de SQLite-events-tabel toch geen
+     * eigen kolom (die heeft alleen ts/bericht) — de gestructureerde
+     * status/duur-info stond dus sowieso al alleen impliciet in de tekst.
      */
     private fun schrijfVerbroken(status: Int, statusNaam: String, duurMs: Long?) {
-        val ts = nu()
-        val statusNaamVeilig = statusNaam.replace("\"", "'")
-        val json = """{"ts":"$ts","type":"disconnect","status":$status,"statusNaam":"$statusNaamVeilig","verbondenDuurMs":${duurMs ?: "null"}}"""
-        schrijfRegel("hr_events.jsonl", json)
-
         val duurTekst = duurMs?.let { formatteerDuur(it) } ?: "onbekend"
         schrijfEvent("BLE verbinding verbroken na $duurTekst (status=$status: $statusNaam)")
     }
@@ -462,25 +478,20 @@ class HrBridgeService : Service() {
         laatsteInstellingenCheckMs = nu
 
         try {
-            val dbBestand = File(hbmonitorMap(), "hbmonitor.db")
-            if (!dbBestand.exists()) return
-            // Alleen-lezen openen: de tailer en hr_sync_server.py schrijven
-            // er ook naartoe (WAL-modus), dus dit mag gelijktijdig.
-            val db = SQLiteDatabase.openDatabase(
-                dbBestand.path, null, SQLiteDatabase.OPEN_READONLY
-            )
-            db.use {
-                val cursor = it.rawQuery("SELECT key, value FROM instellingen", null)
-                cursor.use { c ->
-                    while (c.moveToNext()) {
-                        val key = c.getString(0)
-                        val waarde = c.getString(1)
-                        when (key) {
-                            "limit" -> waarde.toIntOrNull()?.let { v -> alarmLimit = v }
-                            "secondsHigh" -> waarde.toIntOrNull()?.let { v -> alarmSecondsHigh = v }
-                            "cooldownSec" -> waarde.toIntOrNull()?.let { v -> alarmCooldownSec = v }
-                            "mode" -> if (waarde == "audio" || waarde == "vibrate") alarmMode = waarde
-                        }
+            // Gedeelde schrijfbare verbinding i.p.v. een los readonly-open:
+            // met alles nu in hetzelfde proces (geen los Python-proces meer
+            // dat ook naar dezelfde db schrijft) is er geen reden meer om
+            // per read een aparte verbinding te openen.
+            val db = HbmonitorDb.open(applicationContext)
+            db.rawQuery("SELECT key, value FROM instellingen", null).use { c ->
+                while (c.moveToNext()) {
+                    val key = c.getString(0)
+                    val waarde = c.getString(1)
+                    when (key) {
+                        "limit" -> waarde.toIntOrNull()?.let { v -> alarmLimit = v }
+                        "secondsHigh" -> waarde.toIntOrNull()?.let { v -> alarmSecondsHigh = v }
+                        "cooldownSec" -> waarde.toIntOrNull()?.let { v -> alarmCooldownSec = v }
+                        "mode" -> if (waarde == "audio" || waarde == "vibrate") alarmMode = waarde
                     }
                 }
             }
@@ -534,19 +545,12 @@ class HrBridgeService : Service() {
     // ~250ms effect moet hebben op een lopend alarm.
     private fun leesStopAlarmSignaal(): Long {
         return try {
-            val dbBestand = File(hbmonitorMap(), "hbmonitor.db")
-            if (!dbBestand.exists()) return 0L
-            val db = SQLiteDatabase.openDatabase(
-                dbBestand.path, null, SQLiteDatabase.OPEN_READONLY
-            )
-            db.use {
-                val cursor = it.rawQuery(
-                    "SELECT value FROM instellingen WHERE key = ?",
-                    arrayOf("stopAlarmMs")
-                )
-                cursor.use { c ->
-                    if (c.moveToFirst()) c.getString(0)?.toLongOrNull() ?: 0L else 0L
-                }
+            val db = HbmonitorDb.open(applicationContext)
+            db.rawQuery(
+                "SELECT value FROM instellingen WHERE key = ?",
+                arrayOf("stopAlarmMs")
+            ).use { c ->
+                if (c.moveToFirst()) c.getString(0)?.toLongOrNull() ?: 0L else 0L
             }
         } catch (e: Exception) {
             0L

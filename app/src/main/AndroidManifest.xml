@@ -40,6 +40,10 @@
     <!-- Optioneel: service automatisch herstarten na een reboot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Embedded HTTP-server (HrHttpServer, vervangt hr_sync_server.py):
+         nodig om een ServerSocket te mogen openen/luisteren. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:name=".HrBridgeApp"
         android:label="HR BLE Bridge"
