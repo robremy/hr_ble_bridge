@@ -51,18 +51,14 @@ class HrHttpServer(
     private fun handleGet(session: IHTTPSession): Response {
         val path = session.uri
         val datum = session.parameters["date"]?.firstOrNull()
+        val sinds = session.parameters["since"]?.firstOrNull()
 
         return when (path) {
             "/api/health" -> jsonResponse(
                 Response.Status.OK,
                 JSONObject().put("ok", true).put("ip", lanIp())
             )
-            "/api/metingen" -> lijstResponse("metingen", "ts, bpm, contact", datum) { c ->
-                JSONObject()
-                    .put("ts", c.getString(0))
-                    .put("bpm", c.getInt(1))
-                    .put("contact", c.getInt(2))
-            }
+            "/api/metingen" -> metingenResponse(datum, sinds)
             "/api/events" -> lijstResponse("events", "ts, bericht", datum) { c ->
                 JSONObject()
                     .put("ts", c.getString(0))
@@ -87,6 +83,60 @@ class HrHttpServer(
             }
             else -> jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("ok", false).put("error", "not found"))
         }
+    }
+
+    /**
+     * /api/metingen krijgt een eigen functie i.p.v. de generieke
+     * lijstResponse(), omdat dit verreweg de grootste tabel is (tienduizenden
+     * rijen op een drukke dag) en tot nu toe bij ELKE sync-cyclus (elke
+     * paar seconden, via de PWA's bridgeAutoSyncTimer) de HELE dag opnieuw
+     * opbouwde en verstuurde — ook als er sinds de vorige cyclus maar een
+     * handvol nieuwe metingen bijkwamen. Naarmate de dag vordert en het
+     * aantal metingen oploopt (10.000+, soms 20.000+), werd het opnieuw
+     * opbouwen van die hele JSONArray + het versturen ervan elke paar
+     * seconden zwaar genoeg om verbindingen te laten wegvallen — precies
+     * het "TypeError: Failed to fetch"-patroon dat pas optrad nadat de dag
+     * al een tijd bezig was, niet vanaf het begin.
+     *
+     * Met een optionele "since"-parameter (een ts-string, zelfde formaat
+     * als de ts-kolom) hoeft alleen het nieuwe stuk opgehaald te worden.
+     * De PWA kent haar eigen watermark al (bridgeLaatstVerwerkteTs) en
+     * kan die nu meesturen i.p.v.'m alleen client-side te gebruiken om de
+     * volledige respons achteraf te filteren.
+     */
+    private fun metingenResponse(datum: String?, sinds: String?): Response {
+        val db = HbmonitorDb.open(context)
+        val resultaat = JSONArray()
+        val cursor: Cursor = when {
+            datum != null && sinds != null ->
+                db.rawQuery(
+                    "SELECT ts, bpm, contact FROM metingen WHERE ts LIKE ? AND ts > ? ORDER BY ts",
+                    arrayOf("$datum%", sinds)
+                )
+            datum != null ->
+                db.rawQuery(
+                    "SELECT ts, bpm, contact FROM metingen WHERE ts LIKE ? ORDER BY ts",
+                    arrayOf("$datum%")
+                )
+            sinds != null ->
+                db.rawQuery(
+                    "SELECT ts, bpm, contact FROM metingen WHERE ts > ? ORDER BY ts",
+                    arrayOf(sinds)
+                )
+            else ->
+                db.rawQuery("SELECT ts, bpm, contact FROM metingen ORDER BY ts", null)
+        }
+        cursor.use { c ->
+            while (c.moveToNext()) {
+                resultaat.put(
+                    JSONObject()
+                        .put("ts", c.getString(0))
+                        .put("bpm", c.getInt(1))
+                        .put("contact", c.getInt(2))
+                )
+            }
+        }
+        return jsonResponse(Response.Status.OK, resultaat)
     }
 
     private fun lijstResponse(
