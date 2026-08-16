@@ -20,6 +20,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -133,6 +134,46 @@ class HrBridgeService : Service() {
     // verbonden is, dus hij draait onafhankelijk van de GATT-status.
     private var httpServer: HrHttpServer? = null
 
+    // Houdt de Wi-Fi-radio uit powersave zolang deze service draait.
+    // Zonder dit kan een TWEEDE telefoon op hetzelfde LAN, die de
+    // embedded server via het echte Wi-Fi-adres benadert (i.p.v.
+    // 127.0.0.1 zoals deze telefoon zelf), tegen intermitterende "Failed
+    // to fetch" aanlopen zodra het scherm van DEZE telefoon uitgaat: de
+    // foreground-service zelf blijft actief, maar de Wi-Fi-radio mag
+    // zonder deze lock alsnog in powersave gaan, waardoor inkomende
+    // verbindingen af en toe wegvallen tot de eerstvolgende DTIM-beacon.
+    // 127.0.0.1-verkeer (loopback) gaat sowieso nooit over de radio en
+    // was daarom hier nooit door geraakt.
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    private fun verkrijgWifiLock() {
+        if (wifiLock != null) return
+        try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val modus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                @Suppress("DEPRECATION")
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            val lock = wifiManager?.createWifiLock(modus, "$TAG:bridge")
+            lock?.setReferenceCounted(false)
+            lock?.acquire()
+            wifiLock = lock
+        } catch (e: Exception) {
+            Log.e(TAG, "WifiLock verkrijgen mislukt", e)
+        }
+    }
+
+    private fun geefWifiLockVrij() {
+        try {
+            wifiLock?.let { if (it.isHeld) it.release() }
+        } catch (e: Exception) {
+            Log.e(TAG, "WifiLock vrijgeven mislukt", e)
+        }
+        wifiLock = null
+    }
+
     override fun onCreate() {
         super.onCreate()
         maakNotificatieKanaal()
@@ -150,6 +191,7 @@ class HrBridgeService : Service() {
         }
 
         startHttpServerIndienNodig()
+        verkrijgWifiLock()
 
         macAddress?.let { verbind(it) } ?: run {
             Log.e(TAG, "Geen MAC-adres opgegeven, service stopt")
@@ -170,6 +212,7 @@ class HrBridgeService : Service() {
         schrijfEvent("Bridge-service gestopt")
         httpServer?.stop()
         httpServer = null
+        geefWifiLockVrij()
         HbmonitorDb.sluit()
         super.onDestroy()
     }

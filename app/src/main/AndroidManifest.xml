@@ -23,6 +23,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- WifiLock (HrBridgeService): houdt de Wi-Fi-radio uit powersave
+         zolang de service draait, zodat een TWEEDE telefoon op hetzelfde
+         LAN de embedded HTTP-server (HrHttpServer) betrouwbaar kan
+         bereiken ook als het scherm van deze telefoon uit staat. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- Wegschrijven naar gedeelde opslag, leesbaar voor Termux -->
