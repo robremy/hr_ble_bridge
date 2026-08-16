@@ -189,6 +189,16 @@ class HrHttpServer(
         response.addHeader("Access-Control-Allow-Origin", "*")
         response.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         response.addHeader("Access-Control-Allow-Headers", "Content-Type")
+        // Chrome (fully enforced since v130/142) sends a CORS preflight
+        // ahead of ANY request — including plain GETs — when a page on a
+        // public origin (https://robremy.github.io) targets a private-
+        // network address (127.0.0.1/192.168.x.x). Without this header on
+        // the preflight response, Chrome silently kills the fetch with
+        // "TypeError: Failed to fetch", which is indistinguishable from a
+        // dead server on the client side. Harmless to send on every
+        // response, not just OPTIONS. See:
+        // https://developer.chrome.com/blog/private-network-access-preflight
+        response.addHeader("Access-Control-Allow-Private-Network", "true")
         return response
     }
 
