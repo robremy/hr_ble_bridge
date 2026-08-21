@@ -6,6 +6,7 @@ import android.util.Log
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.net.NetworkInterface
 import java.util.Collections
 
@@ -28,6 +29,30 @@ class HrHttpServer(
     companion object {
         private const val TAG = "HrHttpServer"
         const val STANDAARD_POORT = 8787
+
+        // Route -> bestandsnaam in assets/www/. Alleen relevant/gevuld voor
+        // de "withPwa"-flavor (build-apk.yml kopieert de HBmonitor-repo
+        // hierheen vóór de build); bij de "standard"-flavor is assets/www/
+        // leeg en komt BuildConfig.BUNDLE_PWA nooit op true uit, dus deze
+        // map wordt dan gewoon niet gebruikt.
+        private val STATIC_ASSETS = mapOf(
+            "/" to "index.html",
+            "/index.html" to "index.html",
+            "/features.js" to "features.js",
+            "/sw.js" to "sw.js",
+            "/manifest.webmanifest" to "manifest.webmanifest",
+            "/icon-192.png" to "icon-192.png",
+            "/icon-512.png" to "icon-512.png"
+        )
+
+        private fun mimeVoorAsset(naam: String): String = when {
+            naam.endsWith(".html") -> "text/html"
+            naam.endsWith(".js") -> "application/javascript"
+            naam.endsWith(".webmanifest") || naam.endsWith(".json") -> "application/manifest+json"
+            naam.endsWith(".png") -> "image/png"
+            naam.endsWith(".svg") -> "image/svg+xml"
+            else -> "application/octet-stream"
+        }
     }
 
     override fun serve(session: IHTTPSession): Response {
@@ -81,7 +106,43 @@ class HrHttpServer(
                 }
                 jsonResponse(Response.Status.OK, resultaat)
             }
-            else -> jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("ok", false).put("error", "not found"))
+            else -> {
+                // Alleen de "withPwa"-flavor bundelt assets/www/ en zet
+                // BUNDLE_PWA op true (zie app/build.gradle.kts); de gewone
+                // "standard"-build valt hier altijd door naar de bestaande
+                // 404-JSON-respons, exact het huidige gedrag.
+                if (BuildConfig.BUNDLE_PWA) {
+                    serveAsset(path)
+                } else {
+                    jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("ok", false).put("error", "not found"))
+                }
+            }
+        }
+    }
+
+    /**
+     * Serveert de gebundelde PWA-bestanden vanaf assets/www/ zodat de PWA
+     * op hetzelfde private-netwerk-origin draait als de bridge zelf
+     * (http://<bridge-ip>:8787), i.p.v. vanaf de publieke GitHub Pages-
+     * origin. Dat omzeilt Chrome's Local Network Access-permissieprompt
+     * volledig — die is alleen relevant bij een publiek->privaat verzoek,
+     * en dat is hier niet langer het geval. Route "/" en onbekende assets
+     * vallen terug op index.html/404 zoals in STATIC_ASSETS gedefinieerd.
+     */
+    private fun serveAsset(path: String): Response {
+        val bestandsnaam = STATIC_ASSETS[path]
+            ?: return jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("ok", false).put("error", "not found"))
+        return try {
+            val input = context.assets.open("www/$bestandsnaam")
+            val mime = mimeVoorAsset(bestandsnaam)
+            metCors(newFixedLengthResponse(Response.Status.OK, mime, input, input.available().toLong()))
+        } catch (e: IOException) {
+            // assets/www/ leeg of bestand ontbreekt (bv. een withPwa-build
+            // waarbij de HBmonitor-checkout in build-apk.yml is mislukt) —
+            // geen crash, gewoon een nette 404 zodat het probleem zichtbaar
+            // is in de browser i.p.v. de service te laten stuklopen.
+            Log.w(TAG, "Static asset niet gevonden: www/$bestandsnaam", e)
+            jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("ok", false).put("error", "asset not found: $bestandsnaam"))
         }
     }
 

@@ -38,6 +38,38 @@ puzzelstukje.
 
 De app vraagt deze in twee stappen aan (knop 1 en 2 in de app zelf).
 
+## Twee APK-varianten: standard en withPwa
+
+Elke build levert twee losse APK's op (zie Releases), die naast elkaar
+geïnstalleerd kunnen worden (aparte package-namen):
+
+- **`app-standard-debug.apk`** — de gewone bridge-only build zoals voorheen.
+  De PWA blijft je bezoeken via GitHub Pages
+  (`robremy.github.io/HBmonitor`).
+- **`app-withpwa-debug.apk`** — bundelt de PWA-bestanden (uit de
+  `HBmonitor`-repo, automatisch meegebouwd door de workflow) en serveert ze
+  vanaf de bridge zelf op `http://<bridge-ip>:8787/`. Bedoeld voor
+  apparaten waar Chrome's Local Network Access-permissieprompt vastloopt
+  (bevestigd: permissiestatus blijft op `"prompt"` hangen zonder ooit een
+  popup te tonen) — omdat de PWA dan op hetzelfde private-netwerk-origin
+  draait als de bridge, komt LNA nooit in beeld.
+
+Kanttekening: alleen `127.0.0.1`/`localhost` telt voor Chrome als "secure
+context". Een LAN-IP zoals `192.168.1.66` niet — dus op een TWEEDE telefoon
+die de PWA via het LAN-IP bezoekt werkt de bridge-verbinding wel, maar
+registreert de service worker niet (geen offline-cache, geen "toevoegen aan
+beginscherm"). Op de brugtelefoon zelf, via `http://127.0.0.1:8787/`, blijft
+dat allemaal gewoon werken omdat loopback wél als secure context geldt.
+
+**Belangrijk voor updates:** de PWA-bestanden in `app-withpwa-debug.apk`
+worden bij elke bouw vers uit de `HBmonitor`-repo gekopieerd — dus een
+PWA-wijziging komt pas op dit apparaat terecht na een NIEUWE build +
+herinstallatie van deze APK, niet automatisch zoals bij GitHub Pages (die
+direct de laatste `main`-branch serveert). Na elke PWA-push dus opnieuw de
+workflow laten draaien (of gewoon wachten tot de volgende
+`hr_ble_bridge`-push 'm meeneemt) en de nieuwe `app-withpwa-debug.apk`
+installeren.
+
 ## Bouwen (zonder PC, alleen met Termux)
 
 **Belangrijk:** ik kan dit Android-project hier niet zelf compileren — mijn

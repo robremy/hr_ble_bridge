@@ -15,6 +15,32 @@ android {
         versionName = "1.0"
     }
 
+    // Twee varianten uit dezelfde broncode: "standard" is de gewone bridge-
+    // only build (zoals nu), "withPwa" bundelt daarnaast de PWA-bestanden
+    // (index.html/features.js/sw.js/manifest/icons) uit de HBmonitor-repo in
+    // app/src/main/assets/www/ en serveert ze vanaf HrHttpServer zelf via
+    // BuildConfig.BUNDLE_PWA (zie HrHttpServer.kt). Bedoeld voor apparaten
+    // waar Chrome's Local Network Access-permissieprompt op vastloopt
+    // (bevestigd op mobiele Chrome: permissiestatus blijft op "prompt"
+    // hangen zonder ooit een popup te tonen) — door de PWA vanaf hetzelfde
+    // private-netwerk-origin (http://<bridge-ip>:8787) te laden i.p.v.
+    // vanaf de publieke GitHub Pages-origin, komt LNA nooit in beeld.
+    // Clients zonder LNA-problemen blijven gewoon GitHub Pages gebruiken;
+    // voor hen verandert er niets.
+    flavorDimensions += "pwa"
+    productFlavors {
+        create("standard") {
+            dimension = "pwa"
+            buildConfigField("boolean", "BUNDLE_PWA", "false")
+        }
+        create("withPwa") {
+            dimension = "pwa"
+            applicationIdSuffix = ".withpwa"
+            versionNameSuffix = "-withpwa"
+            buildConfigField("boolean", "BUNDLE_PWA", "true")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
