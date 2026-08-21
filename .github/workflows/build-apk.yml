@@ -29,20 +29,59 @@ jobs:
       - name: Gradle wrapper uitvoerbaar maken
         run: chmod +x gradlew
 
-      - name: Debug-APK bouwen
+      # Alleen nodig voor de "withPwa"-flavor: kopieert de PWA-bestanden uit
+      # de HBmonitor-repo naar app/src/main/assets/www/, zodat HrHttpServer
+      # ze kan bundelen en serveren vanaf hetzelfde origin als de bridge zelf
+      # (omzeilt Chrome's Local Network Access-permissieprompt, zie
+      # HrHttpServer.kt/serveAsset()). De "standard"-flavor negeert deze map
+      # gewoon (BuildConfig.BUNDLE_PWA staat daar op false).
+      - name: HBmonitor-PWA ophalen voor withPwa-build
+        uses: actions/checkout@v4
+        with:
+          repository: robremy/HBmonitor
+          path: HBmonitor-src
+
+      - name: PWA-bestanden kopiëren naar assets/www/
+        run: |
+          mkdir -p app/src/main/assets/www
+          cp HBmonitor-src/index.html app/src/main/assets/www/
+          cp HBmonitor-src/features.js app/src/main/assets/www/
+          cp HBmonitor-src/sw.js app/src/main/assets/www/
+          cp HBmonitor-src/manifest.webmanifest app/src/main/assets/www/
+          cp HBmonitor-src/icon-192.png app/src/main/assets/www/
+          cp HBmonitor-src/icon-512.png app/src/main/assets/www/
+
+      - name: Controleren dat alle PWA-assets aanwezig zijn
+        run: |
+          test -f app/src/main/assets/www/index.html
+          test -f app/src/main/assets/www/features.js
+          test -f app/src/main/assets/www/sw.js
+          test -f app/src/main/assets/www/manifest.webmanifest
+          test -f app/src/main/assets/www/icon-192.png
+          test -f app/src/main/assets/www/icon-512.png
+
+      - name: Debug-APK's bouwen (standard + withPwa)
         run: ./gradlew assembleDebug --no-daemon
 
-      - name: APK bewaren als artifact
+      - name: Standard-APK bewaren als artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hr-ble-bridge-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: hr-ble-bridge-standard-debug-apk
+          path: app/build/outputs/apk/standard/debug/app-standard-debug.apk
 
-      - name: APK aan GitHub Release toevoegen
+      - name: WithPwa-APK bewaren als artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hr-ble-bridge-withpwa-debug-apk
+          path: app/build/outputs/apk/withPwa/debug/app-withPwa-debug.apk
+
+      - name: APK's aan GitHub Release toevoegen
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: HR BLE Bridge build ${{ github.run_number }}
-          files: app/build/outputs/apk/debug/app-debug.apk
+          files: |
+            app/build/outputs/apk/standard/debug/app-standard-debug.apk
+            app/build/outputs/apk/withPwa/debug/app-withPwa-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
