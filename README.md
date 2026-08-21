@@ -47,12 +47,18 @@ geïnstalleerd kunnen worden (aparte package-namen):
   De PWA blijft je bezoeken via GitHub Pages
   (`robremy.github.io/HBmonitor`).
 - **`app-withpwa-debug.apk`** — bundelt de PWA-bestanden (uit de
-  `HBmonitor`-repo, automatisch meegebouwd door de workflow) en serveert ze
-  vanaf de bridge zelf op `http://<bridge-ip>:8787/`. Bedoeld voor
-  apparaten waar Chrome's Local Network Access-permissieprompt vastloopt
-  (bevestigd: permissiestatus blijft op `"prompt"` hangen zonder ooit een
-  popup te tonen) — omdat de PWA dan op hetzelfde private-netwerk-origin
-  draait als de bridge, komt LNA nooit in beeld.
+  `HBmonitor`-repo, automatisch opgehaald en gekopieerd door
+  `build-apk.yml`, met een expliciete `test -f`-controle die de build laat
+  falen als er een bestand ontbreekt) en serveert ze vanaf de bridge zelf
+  op `http://<bridge-ip>:8787/`. Bedoeld voor apparaten waar Chrome's Local
+  Network Access-permissieprompt vastloopt (bevestigd: permissiestatus
+  blijft op `"prompt"` hangen zonder ooit een popup te tonen) — omdat de
+  PWA dan op hetzelfde private-netwerk-origin draait als de bridge, komt
+  LNA nooit in beeld.
+  `HrHttpServer.serveAsset()` serveert generiek elk bestand onder
+  `assets/www/` (met padvalidatie tegen `..`/path traversal) — dus een
+  nieuw bestand dat `index.html` later aantrekt (bv. een `style.css`) werkt
+  vanzelf mee, zonder dat `HrHttpServer.kt` aangepast hoeft te worden.
 
 Kanttekening: alleen `127.0.0.1`/`localhost` telt voor Chrome als "secure
 context". Een LAN-IP zoals `192.168.1.66` niet — dus op een TWEEDE telefoon
@@ -69,6 +75,20 @@ direct de laatste `main`-branch serveert). Na elke PWA-push dus opnieuw de
 workflow laten draaien (of gewoon wachten tot de volgende
 `hr_ble_bridge`-push 'm meeneemt) en de nieuwe `app-withpwa-debug.apk`
 installeren.
+
+### Testen na installatie van app-withpwa-debug.apk
+
+Op de brugtelefoon zelf, in Chrome:
+
+1. `http://127.0.0.1:8787/` → moet de HBmonitor-PWA tonen (niet een lege
+   pagina of een JSON-foutmelding).
+2. Rechtstreeks elk statisch bestand controleren:
+   - `http://127.0.0.1:8787/features.js`
+   - `http://127.0.0.1:8787/sw.js`
+   - `http://127.0.0.1:8787/manifest.webmanifest`
+   - `http://127.0.0.1:8787/icon-192.png`
+3. De bridge-endpoints (`/api/health` etc.) moeten los daarvan gewoon
+   blijven werken zoals voorheen.
 
 ## Bouwen (zonder PC, alleen met Termux)
 

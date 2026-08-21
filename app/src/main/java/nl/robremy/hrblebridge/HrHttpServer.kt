@@ -30,27 +30,17 @@ class HrHttpServer(
         private const val TAG = "HrHttpServer"
         const val STANDAARD_POORT = 8787
 
-        // Route -> bestandsnaam in assets/www/. Alleen relevant/gevuld voor
-        // de "withPwa"-flavor (build-apk.yml kopieert de HBmonitor-repo
-        // hierheen vóór de build); bij de "standard"-flavor is assets/www/
-        // leeg en komt BuildConfig.BUNDLE_PWA nooit op true uit, dus deze
-        // map wordt dan gewoon niet gebruikt.
-        private val STATIC_ASSETS = mapOf(
-            "/" to "index.html",
-            "/index.html" to "index.html",
-            "/features.js" to "features.js",
-            "/sw.js" to "sw.js",
-            "/manifest.webmanifest" to "manifest.webmanifest",
-            "/icon-192.png" to "icon-192.png",
-            "/icon-512.png" to "icon-512.png"
-        )
-
         private fun mimeVoorAsset(naam: String): String = when {
             naam.endsWith(".html") -> "text/html"
             naam.endsWith(".js") -> "application/javascript"
+            naam.endsWith(".css") -> "text/css"
             naam.endsWith(".webmanifest") || naam.endsWith(".json") -> "application/manifest+json"
             naam.endsWith(".png") -> "image/png"
             naam.endsWith(".svg") -> "image/svg+xml"
+            naam.endsWith(".jpg") || naam.endsWith(".jpeg") -> "image/jpeg"
+            naam.endsWith(".ico") -> "image/x-icon"
+            naam.endsWith(".woff2") -> "font/woff2"
+            naam.endsWith(".woff") -> "font/woff"
             else -> "application/octet-stream"
         }
     }
@@ -121,28 +111,40 @@ class HrHttpServer(
     }
 
     /**
-     * Serveert de gebundelde PWA-bestanden vanaf assets/www/ zodat de PWA
-     * op hetzelfde private-netwerk-origin draait als de bridge zelf
+     * Serveert willekeurige bestanden vanaf assets/www/ zodat de PWA op
+     * hetzelfde private-netwerk-origin draait als de bridge zelf
      * (http://<bridge-ip>:8787), i.p.v. vanaf de publieke GitHub Pages-
      * origin. Dat omzeilt Chrome's Local Network Access-permissieprompt
      * volledig — die is alleen relevant bij een publiek->privaat verzoek,
-     * en dat is hier niet langer het geval. Route "/" en onbekende assets
-     * vallen terug op index.html/404 zoals in STATIC_ASSETS gedefinieerd.
+     * en dat is hier niet langer het geval.
+     *
+     * Generiek i.p.v. een hardcoded lijst (voorheen STATIC_ASSETS): als
+     * index.html later bv. style.css of een extra script aantrekt, hoeft
+     * deze Kotlin-code niet aangepast te worden zolang het bestand in
+     * assets/www/ terechtkomt. "/" wordt naar index.html gemapt; elk ander
+     * pad wordt direct als relatief bestandspad onder www/ opgevat.
+     *
+     * Padvalidatie: alleen relatieve paden zonder ".."-segmenten worden
+     * toegelaten, om path traversal buiten assets/www/ uit te sluiten
+     * (AssetManager normaliseert "../" zelf niet weg).
      */
     private fun serveAsset(path: String): Response {
-        val bestandsnaam = STATIC_ASSETS[path]
-            ?: return jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("ok", false).put("error", "not found"))
+        val relatiefPad = if (path == "/") "index.html" else path.removePrefix("/")
+        if (relatiefPad.isEmpty() || relatiefPad.split("/").any { it == ".." || it.isEmpty() }) {
+            Log.w(TAG, "Geweigerd (ongeldig pad): $path")
+            return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("ok", false).put("error", "invalid path"))
+        }
         return try {
-            val input = context.assets.open("www/$bestandsnaam")
-            val mime = mimeVoorAsset(bestandsnaam)
+            val input = context.assets.open("www/$relatiefPad")
+            val mime = mimeVoorAsset(relatiefPad)
             metCors(newFixedLengthResponse(Response.Status.OK, mime, input, input.available().toLong()))
         } catch (e: IOException) {
             // assets/www/ leeg of bestand ontbreekt (bv. een withPwa-build
             // waarbij de HBmonitor-checkout in build-apk.yml is mislukt) —
             // geen crash, gewoon een nette 404 zodat het probleem zichtbaar
             // is in de browser i.p.v. de service te laten stuklopen.
-            Log.w(TAG, "Static asset niet gevonden: www/$bestandsnaam", e)
-            jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("ok", false).put("error", "asset not found: $bestandsnaam"))
+            Log.w(TAG, "Static asset niet gevonden: www/$relatiefPad", e)
+            jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("ok", false).put("error", "asset not found: $relatiefPad"))
         }
     }
 
