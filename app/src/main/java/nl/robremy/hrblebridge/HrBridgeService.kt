@@ -221,6 +221,12 @@ class HrBridgeService : Service() {
         if (httpServer != null) return
         try {
             val server = HrHttpServer(applicationContext)
+            // Self-signed TLS vóór start(): NanoHTTPD kan HTTPS niet meer
+            // inschakelen nadat de server al luistert. Zie
+            // SelfSignedCertManager voor waarom (secure-context-eis van
+            // Chrome op een LAN-IP, o.a. nodig voor de service worker en
+            // navigator.storage.persist() op een tweede telefoon/Android TV).
+            server.activeerHttps()
             // 0.0.0.0 (NanoHTTPD default constructor zonder host-arg) i.p.v.
             // alleen 127.0.0.1: laat ook een tweede toestel op hetzelfde
             // WiFi-netwerk verbinden — zelfde afweging als voorheen in
@@ -228,7 +234,7 @@ class HrBridgeService : Service() {
             // authenticatie op deze endpoints.
             server.start(HTTP_START_TIMEOUT_MS, false)
             httpServer = server
-            Log.i(TAG, "HTTP-server gestart op poort ${HrHttpServer.STANDAARD_POORT}")
+            Log.i(TAG, "HTTPS-server gestart op poort ${HrHttpServer.STANDAARD_POORT}")
         } catch (e: Exception) {
             Log.e(TAG, "HTTP-server starten mislukt", e)
             schrijfEvent("HTTP-server starten mislukt: ${e.javaClass.simpleName}: ${e.message}")

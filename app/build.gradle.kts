@@ -70,4 +70,12 @@ dependencies {
     // hr_sync_server.py Termux-proces. org.json (JSONObject/JSONArray)
     // komt al mee met de Android SDK, dus geen extra JSON-dependency nodig.
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+    // Alleen nodig om lokaal een self-signed X.509-certificaat te bouwen
+    // (SelfSignedCertManager.kt): Android's eigen java.security-API's
+    // hebben geen certificate builder (sun.security.x509 bestaat niet op
+    // ART), dus BouncyCastle hiervoor. Puur lokaal gebruikt (geen
+    // netwerkverkeer via BC), geen invloed op de al bestaande TLS-stack
+    // van de rest van de app.
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 }

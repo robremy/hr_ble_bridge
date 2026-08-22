@@ -8,14 +8,25 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.NetworkInterface
+import java.security.KeyStore
 import java.util.Collections
+import javax.net.ssl.KeyManagerFactory
 
 /**
  * Vervangt hr_sync_server.py: dezelfde endpoints, dezelfde JSON-vorm, zodat
- * de PWA (index.html/features.js, BRIDGE_URL blijft http://<ip>:8787)
+ * de PWA (index.html/features.js, BRIDGE_URL is https://<ip>:8787) verder
  * ongewijzigd kan blijven. Draait embedded in HrBridgeService i.p.v. als
  * los Termux-proces — leest/schrijft rechtstreeks via HbmonitorDb, geen
  * los `python hr_sync_server.py` meer nodig.
+ *
+ * Draait over HTTPS (self-signed, zie SelfSignedCertManager) i.p.v. plain
+ * HTTP: Chrome behandelt alleen 127.0.0.1/localhost als "secure context"
+ * bij http, een LAN-IP niet — waardoor navigator.storage.persist(), de
+ * screen wake lock en de service worker daar stil "niet ondersteund" waren.
+ * Een TLS-verbinding telt voor Chrome WEL als secure context zodra de
+ * gebruiker eenmalig de certificaatwaarschuwing wegklikt, op elk toestel
+ * (ook een Android TV, waar chrome://flags-workarounds met een
+ * afstandsbediening niet praktisch zijn).
  *
  * Bewust nog zonder authenticatie, net als de Python-versie: bereikbaar
  * voor elk apparaat op hetzelfde LAN (0.0.0.0), geen verificatie op de
@@ -43,6 +54,19 @@ class HrHttpServer(
             naam.endsWith(".woff") -> "font/woff"
             else -> "application/octet-stream"
         }
+    }
+
+    /**
+     * Schakelt TLS in met een (automatisch gegenereerd/hergebruikt)
+     * self-signed certificaat. MOET vóór start() aangeroepen worden —
+     * NanoHTTPD kan HTTPS niet meer inschakelen nadat de server al luistert.
+     */
+    fun activeerHttps() {
+        val (keyStore, wachtwoord) = SelfSignedCertManager.laadOfGenereer(context)
+        val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+        keyManagerFactory.init(keyStore, wachtwoord)
+        val sslSocketFactory = makeSSLSocketFactory(keyStore, keyManagerFactory.keyManagers)
+        makeSecure(sslSocketFactory, null)
     }
 
     override fun serve(session: IHTTPSession): Response {
@@ -113,7 +137,7 @@ class HrHttpServer(
     /**
      * Serveert willekeurige bestanden vanaf assets/www/ zodat de PWA op
      * hetzelfde private-netwerk-origin draait als de bridge zelf
-     * (http://<bridge-ip>:8787), i.p.v. vanaf de publieke GitHub Pages-
+     * (https://<bridge-ip>:8787), i.p.v. vanaf de publieke GitHub Pages-
      * origin. Dat omzeilt Chrome's Local Network Access-permissieprompt
      * volledig — die is alleen relevant bij een publiek->privaat verzoek,
      * en dat is hier niet langer het geval.

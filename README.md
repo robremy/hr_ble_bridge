@@ -83,12 +83,49 @@ Op de brugtelefoon zelf, in Chrome:
 1. `http://127.0.0.1:8787/` → moet de HBmonitor-PWA tonen (niet een lege
    pagina of een JSON-foutmelding).
 2. Rechtstreeks elk statisch bestand controleren:
-   - `http://127.0.0.1:8787/features.js`
-   - `http://127.0.0.1:8787/sw.js`
-   - `http://127.0.0.1:8787/manifest.webmanifest`
-   - `http://127.0.0.1:8787/icon-192.png`
+   - `https://127.0.0.1:8787/features.js`
+   - `https://127.0.0.1:8787/sw.js`
+   - `https://127.0.0.1:8787/manifest.webmanifest`
+   - `https://127.0.0.1:8787/icon-192.png`
 3. De bridge-endpoints (`/api/health` etc.) moeten los daarvan gewoon
    blijven werken zoals voorheen.
+
+## HTTPS met self-signed certificaat
+
+De server (beide flavors) draait sinds deze versie over **HTTPS** met een
+automatisch gegenereerd self-signed certificaat, niet meer over plain HTTP.
+
+**Waarom:** Chrome behandelt alleen `127.0.0.1`/`localhost` als "secure
+context" bij plain HTTP. Een LAN-IP (`192.168.1.66`) telt daarbij niet mee
+— met als gevolg dat `navigator.storage.persist()`, de screen wake lock en
+de service worker op een tweede telefoon of een Android TV (bereikt via het
+LAN-IP) allemaal stilletjes "niet ondersteund" waren. Een TLS-verbinding
+telt voor Chrome wél als secure context zodra de gebruiker eenmalig de
+certificaatwaarschuwing wegklikt — dat werkt daarna op élk toestel, zonder
+per-toestel `chrome://flags`-workarounds (die op een TV met
+afstandsbediening sowieso niet praktisch zijn).
+
+**Hoe het werkt (`SelfSignedCertManager.kt`):**
+- Bij de eerste keer opstarten wordt een RSA-keypair + zelfondertekend
+  X.509-certificaat gegenereerd (via BouncyCastle, want Android/ART heeft
+  zelf geen certificate builder) en opgeslagen als PKCS12-keystore in de
+  eigen app-opslag (`context.filesDir`) — dus niet gedeeld, niet in de APK
+  gebakken.
+- Het certificaat bevat `localhost`, `127.0.0.1` én het huidige LAN-IP als
+  Subject Alternative Names.
+- Als het LAN-IP later verandert (DHCP-adreswissel), detecteert de app dit
+  bij de volgende opstart en genereert automatisch een nieuw certificaat
+  met het bijgewerkte IP — geen handmatige actie nodig.
+
+**Wat dit betekent bij gebruik:**
+- Elk toestel moet **eenmalig** de certificaatwaarschuwing van Chrome
+  wegklikken bij het eerste bezoek aan `https://<bridge-ip>:8787/`
+  ("Geavanceerd" → "Doorgaan naar [adres] (onveilig)"). Daarna onthoudt
+  Chrome die uitzondering voor dat toestel.
+- Op een Android TV moet dit met de afstandsbediening/D-pad gebeuren —
+  minder soepel dan met een muis, maar te doen.
+- De PWA's `BRIDGE_URL` in `HBmonitor`/`index.html` gebruikt sinds de
+  bijbehorende PWA-update standaard `https://` i.p.v. `http://` als prefix.
 
 ## Bouwen (zonder PC, alleen met Termux)
 
