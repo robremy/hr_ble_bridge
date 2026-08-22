@@ -285,7 +285,16 @@ class HrHttpServer(
         if (ts.isEmpty() || type.isEmpty()) {
             return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("ok", false).put("error", "ts and type are required"))
         }
-        val label = if (data.isNull("label")) null else data.optString("label", null)
+        // JSONObject.optString(String, String) staat sinds compileSdk 34 met
+        // strengere null-annotaties in de SDK-stubs, waardoor Kotlin "null"
+        // als fallback-argument niet meer toestaat ("Type mismatch:
+        // inferred type is Nothing? but String was expected"). Vandaar deze
+        // expliciete if/else i.p.v. een null-fallback doorgeven.
+        val label: String? = if (!data.has("label") || data.isNull("label")) {
+            null
+        } else {
+            data.optString("label", "")
+        }
         val bpm = if (data.has("bpm") && !data.isNull("bpm")) data.optInt("bpm") else null
 
         return try {

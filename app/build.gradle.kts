@@ -60,6 +60,31 @@ android {
         viewBinding = true
         buildConfig = true
     }
+
+    // BouncyCastle (bcprov/bcpkix, voor SelfSignedCertManager) levert
+    // META-INF-bestanden (licenties/handtekeningen/dependency-lijsten) mee
+    // die conflicteren met wat andere libraries al meeleveren — AGP kan dan
+    // niet automatisch kiezen welke in de APK terechtkomt ("more than one
+    // file found with path..."). Deze excludes lossen dat op; ze verwijderen
+    // alleen metadata, geen functionele code.
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/LICENSE.md",
+                "META-INF/LICENSE-notice.md",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+                "META-INF/NOTICE.md",
+                "META-INF/INDEX.LIST",
+                "META-INF/*.RSA",
+                "META-INF/*.SF",
+                "META-INF/*.DSA"
+            )
+        }
+    }
 }
 
 dependencies {
