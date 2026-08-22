@@ -81,7 +81,14 @@ android {
                 "META-INF/INDEX.LIST",
                 "META-INF/*.RSA",
                 "META-INF/*.SF",
-                "META-INF/*.DSA"
+                "META-INF/*.DSA",
+                // OSGi-metadata die bcpkix-jdk18on, bcutil-jdk18on en
+                // bcprov-jdk18on alle drie meeleveren op exact hetzelfde
+                // pad — dit is de daadwerkelijke conflict-melding uit de
+                // Actions-log ("3 files found with path
+                // 'META-INF/versions/9/OSGI-INF/MANIFEST.MF'").
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+                "META-INF/versions/*/OSGI-INF/**"
             )
         }
     }
