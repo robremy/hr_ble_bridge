@@ -44,9 +44,17 @@ object SelfSignedCertManager {
     private const val GELDIGHEID_JAREN = 10L
 
     init {
-        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-            Security.addProvider(BouncyCastleProvider())
-        }
+        // Android heeft standaard al een beperkte, ingebouwde provider met
+        // dezelfde naam "BC" (voor interne cryptografie) — die mist bv. de
+        // SHA256WithRSA-signer die hieronder nodig is. Simpelweg
+        // Security.addProvider(BouncyCastleProvider()) voegt de volledige
+        // library toe, maar omdat de naam al bestaat, blijft Android's
+        // beperktere ingebouwde versie actief (bevestigd via
+        // OperatorCreationException: "The BC provider no longer provides
+        // an implementation for..."). Daarom eerst expliciet verwijderen en
+        // dan de volledige BC-library met voorrang (positie 1) invoegen.
+        Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
+        Security.insertProviderAt(BouncyCastleProvider(), 1)
     }
 
     /**
