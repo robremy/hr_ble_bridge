@@ -1,11 +1,12 @@
 name: Build APK
 
 # Bouwt de app in GitHub's cloud - geen PC/Android Studio nodig.
-# Start automatisch bij een push naar main, of handmatig via
-# "Run workflow" op de Actions-pagina (ook vanaf de GitHub mobile app/site).
+# Start automatisch bij een push naar main of een feature/-branch, of
+# handmatig via "Run workflow" op de Actions-pagina (ook vanaf de
+# GitHub mobile app/site).
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'feature/**' ]
   workflow_dispatch: {}
 
 permissions:
@@ -75,7 +76,8 @@ jobs:
           name: hr-ble-bridge-withpwa-debug-apk
           path: app/build/outputs/apk/withPwa/debug/app-withPwa-debug.apk
 
-      - name: APK's aan GitHub Release toevoegen
+      - name: APK's aan GitHub Release toevoegen (alleen main)
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
